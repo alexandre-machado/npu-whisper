@@ -5,7 +5,10 @@ Status: implementado
 
 Um toque no Alt direito (`voice_chat_hotkey`) alterna entre ditado e conversa
 com a inteligência. Os indicadores refletem a configuração inicial e mudam
-assim que o modo é trocado, inclusive pelas configurações.
+assim que o modo é trocado, inclusive pelas configurações. A troca pelo Alt
+direito ou pela bandeja também liga a escuta contínua se o microfone estiver
+parado; o Ctrl+Espaço continua só ligando e desligando a captura, sem mudar o
+modo.
 
 - **Bandeja:** durante a escuta/gravação, verde indica ditado (`#047857` no
   silêncio, `#10B981` com voz ativa); roxo indica conversa (`#7E22CE` no

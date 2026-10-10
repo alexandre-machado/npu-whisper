@@ -157,7 +157,7 @@ def test_voice_mode_switch_updates_overlay_and_tray(enabled):
     assert app._config["voice_chat"] is enabled
     app._overlay.set_voice_mode.assert_called_once_with(enabled)
     app._tray.refresh.assert_called_once_with()
-    app._engine.set_voice_chat.assert_called_once_with(enabled)
+    app._engine.set_voice_chat.assert_called_once_with(enabled, listen=True)
     app._settings_win.set_voice_chat.assert_called_once_with(enabled)
 
 

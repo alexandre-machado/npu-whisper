@@ -235,7 +235,9 @@ def test_memory_priority_deduplication_and_log_counts(app, project, monkeypatch)
     assert app._transcription_hotwords() == {
         "hotwords": "LATEST, DEBORA-WHISPER, older, debora whisper"}
     app._transcription_hotwords()
-    log.assert_called_once_with("Voice chat: using 3 memory hint terms and 1 project hint terms")
+    # Background threads left by other tests may log meanwhile.
+    hints = [c.args for c in log.call_args_list if "hint terms" in str(c.args)]
+    assert hints == [("Voice chat: using 3 memory hint terms and 1 project hint terms",)]
 
 
 @pytest.mark.parametrize("count, project_count", [(39, 1), (40, 0)])

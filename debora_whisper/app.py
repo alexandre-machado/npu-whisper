@@ -393,7 +393,7 @@ class GUIApp:
         self._overlay.set_voice_mode(enabled)
         self._tray.refresh()
         save_config(self._config)
-        self._engine.set_voice_chat(enabled)
+        self._engine.set_voice_chat(enabled, listen=True)
         if self._settings_win and self._settings_win.is_open:
             self._settings_win.set_voice_chat(enabled)
 

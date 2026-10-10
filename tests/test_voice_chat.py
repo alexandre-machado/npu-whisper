@@ -1126,7 +1126,7 @@ def test_tray_item_switches_without_a_new_engine():
         gui._set_voice_chat(True)
         g["save_config"].assert_called_once()
     assert gui._config["voice_chat"] is True
-    engine.set_voice_chat.assert_called_once_with(True)
+    engine.set_voice_chat.assert_called_once_with(True, listen=True)
     gui._settings_win.set_voice_chat.assert_called_once_with(True)
     assert gui._engine is engine
 

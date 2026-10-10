@@ -3526,6 +3526,17 @@ class DictationApp:
             threading.Thread(target=self._stop_continuous_when_idle,
                              args=(self._continuous_since, idle), daemon=True).start()
 
+    def start_listening(self):
+        """A mode switch opens continuous listening, whatever tap_action is;
+        the hotkey alone still stops it. No-op if the microphone is busy."""
+        if (self._stopping.is_set() or self._continuous or self.is_recording
+                or self._transcribing or getattr(self, "_hotkey_held", False)):
+            return
+        press_time = time.time()
+        self._start_recording(time.perf_counter())
+        if self.is_recording:
+            self._begin_continuous(press_time)
+
     def _stop_continuous_when_idle(self, session, idle_seconds, poll=1.0):
         """A stray tap must not leave the microphone open indefinitely."""
         while not self._stopping.wait(poll):
@@ -3594,14 +3605,17 @@ class DictationApp:
             self.on_voice_chat_toggle()
         else:
             enabled = not self.config.get("voice_chat")
-            threading.Thread(target=self.set_voice_chat, args=(enabled,),
+            threading.Thread(target=self.set_voice_chat, args=(enabled, True),
                              daemon=True).start()
 
-    def set_voice_chat(self, enabled: bool):
+    def set_voice_chat(self, enabled: bool, listen: bool = False):
         """Switch voice chat while running. On: the TTS server and the LLM
         load in the background. Off: the reply in progress stops. Both stay
-        loaded either way, so switching back is instant."""
+        loaded either way, so switching back is instant. With `listen` (the
+        mode hotkey or tray), an idle microphone starts continuous listening."""
         set_voice_chat_config(self.config, enabled)
+        if listen:
+            threading.Thread(target=self.start_listening, daemon=True).start()
         if enabled:
             log("Voice chat on.")
             self._warm_up_voice_chat()

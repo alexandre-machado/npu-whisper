@@ -169,7 +169,7 @@ def test_engine_hotkey_without_app_switches_engine():
             if set_voice_chat.called:
                 break
             time.sleep(0.005)
-    set_voice_chat.assert_called_once_with(True)
+    set_voice_chat.assert_called_once_with(True, True)
 
 
 @pytest.mark.parametrize("key", ["ctrl+space", "a,b"])
@@ -186,3 +186,55 @@ def test_config_accepts_single_key_hotkey_or_disabled(key):
 def test_config_rejects_non_string_hotkey():
     with pytest.raises(ValueError, match="voice_chat_hotkey"):
         validate_config({**DEFAULT_CONFIG, "voice_chat_hotkey": 1})
+
+
+def _listening_app(**state):
+    app = DictationApp({**DEFAULT_CONFIG, "beep_on_start": False})
+    for key, value in state.items():
+        setattr(app, key, value)
+    return app
+
+
+def test_mode_switch_starts_continuous_listening_when_idle():
+    app = _listening_app()
+
+    def start(_perf):
+        app.is_recording = True
+
+    with patch.object(app, "_start_recording", side_effect=start) as start_recording, \
+            patch.object(app, "_begin_continuous") as begin:
+        app.start_listening()
+    start_recording.assert_called_once()
+    begin.assert_called_once()
+
+
+@pytest.mark.parametrize("state", [{"_continuous": True}, {"is_recording": True},
+                                   {"_transcribing": True}, {"_hotkey_held": True}])
+def test_mode_switch_leaves_a_busy_microphone_alone(state):
+    app = _listening_app(**state)
+    with patch.object(app, "_start_recording") as start_recording:
+        app.start_listening()
+    start_recording.assert_not_called()
+
+
+def test_failed_start_does_not_begin_continuous():
+    app = _listening_app()
+    with patch.object(app, "_start_recording"), \
+            patch.object(app, "_begin_continuous") as begin:
+        app.start_listening()
+    begin.assert_not_called()
+
+
+def test_set_voice_chat_listens_only_when_asked():
+    app = _listening_app()
+    with patch.object(app, "start_listening") as start_listening, \
+            patch.object(app, "_warm_up_voice_chat"):
+        app.set_voice_chat(True)
+        time.sleep(0.05)
+        start_listening.assert_not_called()
+        app.set_voice_chat(False, listen=True)
+        for _ in range(200):
+            if start_listening.called:
+                break
+            time.sleep(0.005)
+    start_listening.assert_called_once_with()
