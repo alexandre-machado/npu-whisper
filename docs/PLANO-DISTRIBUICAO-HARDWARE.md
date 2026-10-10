@@ -159,10 +159,16 @@ implementado. Na máquina CPU, encoder **e** decoder devem obedecer CPU.
 Manter captura/VAD responsivos e filas limitadas em todos os casos. A proteção
 `debora_whisper/dictation_engine.py:_inference_gate`, usada em
 `DictationApp._finish_recording` e `DictationApp._load_voice_chat`, evita sobrepor
-compilação do LLM na iGPU e inferência na NPU, combinação já associada a perda
-de dispositivo. Preservá-la até validar uma substituição por agendamento no
-supervisor. Adiar compilação do LLM para depois da prontidão do STT e intervalo
-ocioso; não presumir que processos separados eliminam conflito de driver.
+a compilação do LLM na iGPU durante o warm-up e a inferência na NPU, combinação
+já associada a perda de dispositivo. Essa proteção não cobre todos os caminhos:
+`debora_whisper/voice_chat.py:generate_reply` chama `load_llm` diretamente e,
+se o processo tiver encerrado, pode reiniciá-lo e compilar via `start_llm` sem
+adquirir o gate, enquanto o STT transcreve novo áudio. Preservar o gate atual e
+implementar agendamento coordenado em **todos** os caminhos de carga/reinício
+do LLM antes de contar com essa exclusão como garantia geral. Validar qualquer
+substituição do gate pelo supervisor. Adiar compilação do LLM para depois da
+prontidão do STT e intervalo ocioso; não presumir que processos separados
+eliminam conflito de driver.
 
 ## 5. Fallback por componente
 
@@ -205,10 +211,18 @@ após mudança de versão/modelo ou solicitação explícita.
 
 Voltar ao preferido apenas após carga e inferência no dispositivo real, sem
 fallback silencioso, e em limite de turno com reserva para a troca. Aplicar pelo
-menos 60 s de estabilidade antes de outra promoção. Reutilizar as garantias de
-`DictationApp.inject_recovered_model`: adiar durante trabalho ativo e rejeitar
-resultado de uma geração de plano/configuração antiga. Se não houver memória
-para duas instâncias, permanecer no fallback até uma recarga ociosa planejada.
+menos 60 s de estabilidade antes de outra promoção. Reutilizar as verificações
+de atividade e encerramento de `DictationApp.inject_recovered_model`, que hoje
+não recebe snapshot da configuração nem identificador de geração. A guarda em
+`GUIApp._swap_to_recovered_npu` compara apenas a identidade do engine, capturada
+por `GUIApp._run_npu_recovery_probe` **depois** do probe; uma troca em Settings
+durante a recuperação ainda pode instalar um modelo antigo no engine novo.
+Implementar como trabalho novo a captura da identidade do engine e de um
+snapshot com geração do plano/configuração **antes** do probe. Validar ambos
+atomicamente com a instalação, inclusive nas tentativas adiadas, rejeitando
+resultados obsoletos e impedindo troca de engine/configuração entre validação
+e instalação. Se não houver memória para duas instâncias, permanecer no
+fallback até uma recarga ociosa planejada.
 
 Preservar áudio pendente em fila limitada e tentar o segmento STT uma única vez
 na alternativa, sem repetir texto já inserido. LLM não repete trechos já enviados;
@@ -299,7 +313,8 @@ recuperação. Manter possibilidade de voltar à política anterior durante roll
   antes de habilitar essa separação por padrão. Timeout de processo limita a
   espera da interface, mas não garante recuperação de um driver travado.
 - A compilação LLM/iGPU pode bloquear STT/NPU mesmo após isolamento. Até validar
-  cancelamento e agendamento seguros, manter exclusão e mostrar “preparando chat”.
+  cancelamento e agendamento seguros, preservar a exclusão no warm-up, estendê-la
+  a todos os caminhos de carga/reinício e mostrar “preparando chat”.
 - Fallback CUDA → OpenVINO exige outro export local do mesmo modelo; como
   preparar esses artefatos sem download no momento da falha e sem duplicação
   excessiva em disco? Tornar essa preparação explícita no setup.
