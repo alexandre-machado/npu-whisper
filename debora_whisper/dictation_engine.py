@@ -300,6 +300,9 @@ def load_config() -> dict:
 
 
 def save_config(config: dict):
+    config = dict(config)
+    if "_saved_voice_chat" in config:
+        config["voice_chat"] = config.pop("_saved_voice_chat")
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     with open(CONFIG_FILE, "w") as f:
         json.dump(config, f, indent=2)
@@ -313,11 +316,18 @@ def start_in_dictation(config: dict, voice_chat_requested: bool = False) -> bool
     the caller still warms it up for that first tap."""
     if (config.get("continuous_listening") and config.get("voice_chat")
             and not voice_chat_requested):
+        config["_saved_voice_chat"] = config["voice_chat"]
         config["voice_chat"] = False
         log("Continuous listening at startup: starting in dictation; tap "
             f"{config.get('voice_chat_hotkey') or 'the voice chat hotkey'} for voice chat.")
         return True
     return False
+
+
+def set_voice_chat_config(config: dict, enabled: bool):
+    """An explicit mode choice replaces the saved startup preference."""
+    config.pop("_saved_voice_chat", None)
+    config["voice_chat"] = bool(enabled)
 
 
 def validate_config(config: dict):
@@ -365,6 +375,8 @@ def validate_config(config: dict):
         raise ValueError("voice_chat_backend must be local or claude")
     if not isinstance(config.get("voice_chat_hotkey", ""), str):
         raise ValueError("voice_chat_hotkey must be a string")
+    if any(separator in config.get("voice_chat_hotkey", "") for separator in ("+", ",")):
+        raise ValueError('voice_chat_hotkey must be a single key or "" to disable')
     if not isinstance(config.get("harness_hotwords", True), bool):
         raise ValueError("harness_hotwords must be a bool")
     for key in ("harness_cwd", "harness_model", "harness_prompt_file", "harness_memory_file"):
@@ -3556,6 +3568,11 @@ class DictationApp:
         key = self.config.get("voice_chat_hotkey", "").strip()
         if not key:
             return
+        try:
+            keyboard.key_to_scan_codes(key)
+        except ValueError:
+            log(f"Voice chat hotkey {key!r} is not a key; voice chat hotkey disabled.")
+            return
         keyboard.hook(SoloKeyTap(key, self._on_voice_chat_hotkey).handle)
         log(f"Voice chat hotkey {key} registered (tap it alone).")
 
@@ -3572,7 +3589,7 @@ class DictationApp:
         """Switch voice chat while running. On: the TTS server and the LLM
         load in the background. Off: the reply in progress stops. Both stay
         loaded either way, so switching back is instant."""
-        self.config["voice_chat"] = bool(enabled)
+        set_voice_chat_config(self.config, enabled)
         if enabled:
             log("Voice chat on.")
             self._warm_up_voice_chat()

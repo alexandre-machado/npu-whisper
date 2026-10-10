@@ -1,4 +1,7 @@
 """Tests for config validation."""
+import json
+from unittest.mock import MagicMock
+
 import pytest
 
 from debora_whisper.dictation_engine import validate_config, DEFAULT_CONFIG
@@ -65,3 +68,86 @@ def test_startup_keeps_voice_chat_without_continuous_or_when_requested():
     config = {"continuous_listening": True, "voice_chat": True}
     start_in_dictation(config, voice_chat_requested=True)
     assert config["voice_chat"] is True
+
+
+@pytest.fixture
+def saved_config(tmp_path, monkeypatch):
+    from debora_whisper import dictation_engine
+    config_file = tmp_path / "config.json"
+    monkeypatch.setattr(dictation_engine, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(dictation_engine, "CONFIG_FILE", config_file)
+    return config_file
+
+
+def test_startup_override_survives_unrelated_save(saved_config):
+    from debora_whisper.dictation_engine import save_config, start_in_dictation
+    config = {**DEFAULT_CONFIG, "continuous_listening": True, "voice_chat": True}
+    assert start_in_dictation(config) is True
+    validate_config(config)
+    config["balloon_width"] = 400
+    save_config(config)
+    saved = json.loads(saved_config.read_text())
+    assert saved["voice_chat"] is True
+    assert saved["balloon_width"] == 400
+    assert "_saved_voice_chat" not in saved
+    assert config["voice_chat"] is False
+    assert config["_saved_voice_chat"] is True
+
+
+def _config_gui(config):
+    from debora_whisper.app import GUIApp
+    gui = GUIApp.__new__(GUIApp)
+    gui._config = config
+    gui._engine = MagicMock()
+    gui._engine.stop_if_idle.return_value = None
+    gui._overlay, gui._tray = MagicMock(), MagicMock()
+    gui._settings_win = MagicMock(is_open=True)
+    gui._new_engine = MagicMock()
+    return gui
+
+
+@pytest.mark.parametrize("path", ["cli", "gui"])
+def test_explicit_voice_chat_off_is_saved(saved_config, monkeypatch, path):
+    from debora_whisper.dictation_engine import DictationApp, save_config, start_in_dictation
+    config = {**DEFAULT_CONFIG, "continuous_listening": True, "voice_chat": True,
+              "beep_on_start": False}
+    start_in_dictation(config)
+    if path == "cli":
+        app = DictationApp(config)
+        monkeypatch.setattr(app, "_interrupt_voice_reply", MagicMock())
+        monkeypatch.setattr(app, "voice_chat", MagicMock())
+        app.set_voice_chat(False)
+        save_config(config)
+    else:
+        _config_gui(config)._set_voice_chat(False)
+    saved = json.loads(saved_config.read_text())
+    assert saved["voice_chat"] is False
+    assert "_saved_voice_chat" not in saved
+    assert "_saved_voice_chat" not in config
+
+
+@pytest.mark.parametrize("rebuild", [False, True])
+@pytest.mark.parametrize("enabled", [False, True])
+def test_settings_preserve_preference_until_mode_changes(saved_config, rebuild, enabled):
+    from debora_whisper.dictation_engine import start_in_dictation
+    config = {**DEFAULT_CONFIG, "continuous_listening": True, "voice_chat": True}
+    start_in_dictation(config)
+    gui = _config_gui(config)
+    new_config = {**config, "voice_chat": enabled, "balloon_width": 400}
+    if rebuild:
+        new_config["hotkey"] = "ctrl+alt+v"
+    gui._on_settings_apply(new_config)
+    saved = json.loads(saved_config.read_text())
+    assert saved["voice_chat"] is True
+    assert "_saved_voice_chat" not in saved
+    assert config["voice_chat"] is enabled
+    assert ("_saved_voice_chat" in config) is (not enabled)
+    if enabled:
+        gui._on_settings_apply({**new_config, "voice_chat": False})
+        assert json.loads(saved_config.read_text())["voice_chat"] is False
+        # An open settings window still has its copy of the startup marker.
+        gui._on_settings_apply({**new_config, "voice_chat": False})
+        saved = json.loads(saved_config.read_text())
+        assert saved["voice_chat"] is False
+        assert "_saved_voice_chat" not in saved
+        assert "_saved_voice_chat" not in config

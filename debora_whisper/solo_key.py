@@ -19,37 +19,40 @@ class SoloKeyTap:
     """
 
     def __init__(self, key: str, on_tap, max_seconds: float = 0.6,
-                 clock=time.monotonic):
+                 stale_seconds: float = 2.0, clock=time.monotonic):
         key = key.strip().lower()
         self.names = frozenset(ALIASES.get(key, (key,)))
         self._on_tap = on_tap
         self.max_seconds = max_seconds
+        self.stale_seconds = stale_seconds
         self._clock = clock
         self._down_at = None
         self._spoiled = False
-        # Other keys held, by scan code: a key's name can change between its
-        # down and up events (AltGr+Q goes down as "/" and up as "q").
-        self._held = set()
+        # Other keys held, by scan code, with their last down event: a key's
+        # name can change between its down and up events (AltGr+Q goes down
+        # as "/" and up as "q").
+        self._held = {}
 
     def handle(self, event):
         name = (event.name or "").lower()
         if name in self.names:
             if event.event_type == "down":
                 if self._down_at is None:  # auto-repeat keeps the first press
-                    self._down_at = self._clock()
+                    self._down_at = now = self._clock()
+                    # A held key auto-repeats its down event; one silent for
+                    # stale_seconds lost its up event (Win+L, a UAC prompt)
+                    # and must not block the key forever.
+                    self._held = {code: at for code, at in self._held.items()
+                                  if now - at <= self.stale_seconds}
                     self._spoiled = bool(self._held)
             elif self._down_at is not None:
                 solo = (not self._spoiled
                         and self._clock() - self._down_at <= self.max_seconds)
                 self._down_at = None
-                # Forget held keys: one whose up event the hook never saw
-                # (Win+L, a UAC prompt) then blocks one tap, not all of them.
-                # The cost is a second tap while still holding Ctrl.
-                self._held.clear()
                 if solo:
                     self._on_tap()
         elif event.event_type == "down":
-            self._held.add(event.scan_code)
+            self._held[event.scan_code] = self._clock()
             self._spoiled = True
         else:
-            self._held.discard(event.scan_code)
+            self._held.pop(event.scan_code, None)

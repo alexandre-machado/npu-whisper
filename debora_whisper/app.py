@@ -14,7 +14,7 @@ import customtkinter as ctk
 from debora_whisper.dictation_engine import (
     AppState, DictationApp, MODEL_REGISTRY,
     load_config, save_config, start_in_dictation, validate_config, log, create_model,
-    is_model_downloaded, device_failure,
+    is_model_downloaded, device_failure, set_voice_chat_config,
     apply_device_priority, avoid_lost_npu, detect_devices, rotate_logs, log_folder_moves,
     select_device,
 )
@@ -389,7 +389,7 @@ class GUIApp:
         """Switch voice chat on the running engine; no restart, no rebuild.
         The LLM loads in its own process, so even a hung load cannot freeze
         the app."""
-        self._config["voice_chat"] = enabled
+        set_voice_chat_config(self._config, enabled)
         self._overlay.set_voice_mode(enabled)
         self._tray.refresh()
         save_config(self._config)
@@ -445,7 +445,10 @@ class GUIApp:
         if harness_changed:
             self._engine.voice_chat.interrupt()
             log("Voice chat: backend settings changed; applied on the next turn.")
-        self._config.update(new_config)
+        self._config.update({key: value for key, value in new_config.items()
+                             if key != "_saved_voice_chat"})
+        if voice_chat_changed:
+            set_voice_chat_config(self._config, bool(voice_chat))
         save_config(self._config)
         if voice_chat_changed and not (rebuild and not failure):
             # A rebuilt engine starts voice chat itself; this one switches now.

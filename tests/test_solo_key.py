@@ -68,7 +68,9 @@ def test_released_key_no_longer_blocks():
 def test_long_held_modifier_still_blocks():
     send, taps = _tap()
     send("ctrl", "down")
-    send("right alt", "down", after=5)
+    for _ in range(10):
+        send("ctrl", "down", after=0.5)  # auto-repeat while held
+    send("right alt", "down")
     send("right alt", "up", after=0.1)
     assert taps == []
 
@@ -84,12 +86,26 @@ def test_key_name_changing_between_down_and_up_does_not_stick():
     assert len(taps) == 1
 
 
-def test_missed_key_up_blocks_only_one_tap():
+def test_missed_key_up_blocks_taps_only_until_stale():
     send, taps = _tap()
     send("windows", "down")  # its up event lost behind the lock screen
     send("right alt", "down", after=0.1)
     send("right alt", "up", after=0.1)
     assert taps == []
+    send("right alt", "down", after=2.5)
+    send("right alt", "up", after=0.1)
+    assert len(taps) == 1
+
+
+def test_ctrl_held_blocks_repeated_taps():
+    send, taps = _tap()
+    send("ctrl", "down")
+    for _ in range(3):
+        send("ctrl", "down", after=0.5)  # auto-repeat while held
+        send("right alt", "down", after=0.1)
+        send("right alt", "up", after=0.1)
+    assert taps == []
+    send("ctrl", "up", after=0.1)
     send("right alt", "down", after=0.1)
     send("right alt", "up", after=0.1)
     assert len(taps) == 1
@@ -110,15 +126,31 @@ def test_up_without_down_is_ignored():
     assert taps == []
 
 
-def test_engine_hotkey_calls_app_callback():
-    app = DictationApp({**DEFAULT_CONFIG, "beep_on_start": False})
+@pytest.mark.parametrize("key", ["right alt", "alt gr"])
+def test_engine_hotkey_calls_app_callback(key):
+    app = DictationApp({**DEFAULT_CONFIG, "beep_on_start": False,
+                        "voice_chat_hotkey": key})
     app.on_voice_chat_toggle = MagicMock()
     keyboard = MagicMock()
     app._register_voice_chat_hotkey(keyboard)
+    keyboard.key_to_scan_codes.assert_called_once_with(key)
     handler = keyboard.hook.call_args.args[0]
     handler(SimpleNamespace(name="alt gr", event_type="down", scan_code=541))
     handler(SimpleNamespace(name="alt gr", event_type="up", scan_code=541))
     app.on_voice_chat_toggle.assert_called_once()
+
+
+def test_engine_unknown_hotkey_is_disabled():
+    app = DictationApp({**DEFAULT_CONFIG, "beep_on_start": False,
+                        "voice_chat_hotkey": "unknown key"})
+    keyboard = MagicMock()
+    keyboard.key_to_scan_codes.side_effect = ValueError("Unknown key")
+    with patch("debora_whisper.dictation_engine.log") as log:
+        app._register_voice_chat_hotkey(keyboard)
+    keyboard.key_to_scan_codes.assert_called_once_with("unknown key")
+    keyboard.hook.assert_not_called()
+    log.assert_called_once_with(
+        "Voice chat hotkey 'unknown key' is not a key; voice chat hotkey disabled.")
 
 
 def test_engine_hotkey_disabled_when_empty():
@@ -138,6 +170,17 @@ def test_engine_hotkey_without_app_switches_engine():
                 break
             time.sleep(0.005)
     set_voice_chat.assert_called_once_with(True)
+
+
+@pytest.mark.parametrize("key", ["ctrl+space", "a,b"])
+def test_config_rejects_multi_key_hotkey(key):
+    with pytest.raises(ValueError, match='must be a single key or "" to disable'):
+        validate_config({**DEFAULT_CONFIG, "voice_chat_hotkey": key})
+
+
+@pytest.mark.parametrize("key", ["right alt", "alt gr", ""])
+def test_config_accepts_single_key_hotkey_or_disabled(key):
+    validate_config({**DEFAULT_CONFIG, "voice_chat_hotkey": key})
 
 
 def test_config_rejects_non_string_hotkey():
