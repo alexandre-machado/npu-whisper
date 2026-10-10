@@ -3342,9 +3342,12 @@ class DictationApp:
             try:
                 self._set_state(AppState.PROCESSING, {"user_text": text})
 
-                def on_reply(reply):
+                def on_reply(reply, seconds=None):
                     if not stop.is_set() and not self._stopping.is_set():
-                        self._set_state(AppState.SPEAKING, {"text": reply})
+                        data = {"text": reply}
+                        if seconds:
+                            data["seconds"] = seconds  # the newest sentence's audio
+                        self._set_state(AppState.SPEAKING, data)
 
                 reply = self.voice_chat.respond(text, on_reply=on_reply, stop=stop)
                 if (not reply and entry["voice_chat_status"] != "interrupted"

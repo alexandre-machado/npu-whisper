@@ -852,7 +852,8 @@ class VoiceChat:
     def respond(self, text: str, on_reply=None, stop=None) -> str:
         """Ask the LLM, speak its reply and return the text spoken so far
         ("" if the LLM failed). on_reply(text) gets the reply as it grows,
-        each sentence when its audio starts (at once if it has no audio)."""
+        each sentence when its audio starts (at once if it has no audio);
+        on_reply(text, seconds) also says how long that audio plays."""
         started = time.perf_counter()
         turn = time.monotonic_ns()
         timings = []
@@ -877,17 +878,22 @@ class VoiceChat:
 
         shown = []
 
-        def show(timing):
-            # Her words enter the balloon together with her voice.
+        def show(timing, audible=False):
+            # Her words enter the balloon together with her voice, and with
+            # how long that voice lasts.
             if timing.get("shown") and on_reply:
                 shown.append(timing["shown"])
-                on_reply(" ".join(shown))
+                seconds = timing.get("seconds") if audible else None
+                if seconds:
+                    on_reply(" ".join(shown), seconds)
+                else:
+                    on_reply(" ".join(shown))
 
         def playback_started(timing):
             nonlocal first_audio
             timing["play"] = time.perf_counter() - started
             self._show_audio(True)
-            show(timing)
+            show(timing, audible=True)
             self._remember_spoken(timing["spoken"], timing["audio"])
             if first_audio is None:
                 first_audio = timing["play"]
@@ -1031,7 +1037,11 @@ class VoiceChat:
                     if audio is not None:
                         timing["audio"] = len(audio[0]) / audio[1]
                         timing["spoken"] = spoken
-                        clips.put((trim_silence(*audio), audio[1], timing))
+                        samples = trim_silence(*audio)
+                        if len(samples):
+                            # What is heard; the balloon slides at this pace.
+                            timing["seconds"] = len(samples) / audio[1]
+                        clips.put((samples, audio[1], timing))
                     else:
                         log_timing(timing)
                         clips.put(((), None, timing))  # text only, in order

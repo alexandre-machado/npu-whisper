@@ -377,14 +377,15 @@ def test_the_reply_shows_as_speaking_never_as_ready(typed):
     app.add_callback(lambda s, d: states.append((s, d)))
 
     def respond(text, on_reply, stop):
-        on_reply("Oi,")
+        on_reply("Oi,", 0.5)
         on_reply("Oi, tudo bem!")
         return "Oi, tudo bem!"
     with patch.object(app.voice_chat, "respond", side_effect=respond):
         _say(app, "oi")
     kinds = [s for s, _ in states]
     assert de.AppState.READY not in kinds
-    assert states[-3:] == [(de.AppState.SPEAKING, {"text": "Oi,"}),
+    # The audio's length goes along for the balloon's pace, when there is one.
+    assert states[-3:] == [(de.AppState.SPEAKING, {"text": "Oi,", "seconds": 0.5}),
                            (de.AppState.SPEAKING, {"text": "Oi, tudo bem!"}),
                            (de.AppState.RECORDING, {"draft_text": ""})]
 
@@ -1202,6 +1203,15 @@ def test_notice_shows_only_in_the_tray_without_changing_state():
     gui._tray.update_state.assert_called_once_with("recording", "Débora Whisper — Voice chat ready")
 
 
+@pytest.mark.parametrize("data, seconds", [
+    ({"text": "Oi.", "seconds": 1.5}, 1.5), ({"text": "Oi."}, None)])
+def test_speaking_passes_the_audio_length_to_the_balloon(data, seconds):
+    gui = _gui()
+    gui._audio_poll_id = None
+    gui._update_ui(de.AppState.SPEAKING, data)
+    gui._overlay.show_speaking.assert_called_once_with("Oi.", seconds)
+
+
 def test_talking_only_animates_the_mascot():
     gui = _gui()
     gui._update_ui(de.AppState.SPEAKING, {"talking": "debora", "active": True})
@@ -1677,11 +1687,15 @@ def test_short_answers_after_her_sentence_are_not_echo(text, started, echo, monk
 def test_her_text_enters_the_balloon_with_her_voice(server):
     shown = []
     chat, played = _chat(server, FakeLLM(["A capital é Canberra. ", "Fica no sul, perto do mar."]))
+    seconds = []
     chat.respond("qual é a capital da austrália",
-                 on_reply=lambda text: shown.append((text, len(played))))
+                 on_reply=lambda text, audio: (shown.append((text, len(played))),
+                                               seconds.append(audio)))
     # Each sentence appears as its clip starts, never while it is synthesized.
     assert shown == [("A capital é Canberra.", 0),
                      ("A capital é Canberra. Fica no sul, perto do mar.", 1)]
+    # With how long its trimmed clip plays, for the balloon's pace.
+    assert seconds == [samples / rate for samples, rate in played] and all(seconds)
 
 
 def test_her_text_still_shows_without_a_voice(server, monkeypatch):

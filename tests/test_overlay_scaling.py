@@ -367,6 +367,54 @@ def test_explicit_text_geometry_and_independent_eased_offsets(scale):
     assert overlay._slide_offset("reply", target - 30, 0.5) == target - 30
 
 
+def test_her_sentence_slides_at_the_pace_of_its_audio():
+    overlay = _overlay()
+    overlay.show_processing("oi", voice_chat=True)
+    overlay.show_speaking("resposta", seconds=4.0)
+    overlay._slides.clear()
+    overlay._pace = 4.0
+    assert overlay._slide_offset("row", -100, 0) == 0
+    overlay._pace = None  # what _draw_text does after its first draw
+    # Linear: a quarter of the audio, a quarter of the way.
+    assert overlay._slide_offset("row", -100, 1.0) == -25
+    assert overlay._slide_offset("row", -100, 2.0) == -50
+    assert overlay._slide_offset("row", -100, 4.0) == -100
+    # The next sentence without audio keeps the quick ease-out.
+    assert overlay._slide_offset("row", -140, 4.0) == -100
+    assert overlay._slide_offset("row", -140, 4.0 + overlay.SLIDE_SECONDS) == -140
+
+
+def test_next_sentence_continues_from_where_the_last_one_is():
+    overlay = _overlay()
+    overlay._pace = 2.0
+    overlay._slide_offset("row", -100, 0)
+    overlay._pace = 4.0
+    assert overlay._slide_offset("row", -300, 1.0) == -50
+    assert overlay._slide_offset("row", -300, 3.0) == -175
+    assert overlay._slide_offset("row", -300, 5.0) == -300
+
+
+@pytest.mark.parametrize("left, held", [(3.0, True), (0.1, False)])
+def test_an_interrupted_sentence_stops_sliding(monkeypatch, left, held):
+    now = [0.0]
+    monkeypatch.setattr("debora_whisper.ui.overlay.monotonic", lambda: now[0])
+    overlay = _overlay()
+    overlay.show_processing("oi", voice_chat=True)
+    overlay.show_speaking("resposta", seconds=4.0)
+    overlay._slides.clear()
+    overlay._pace = 4.0
+    overlay._slide_offset("row", -100, 0)
+    now[0] = 4.0 - left
+    overlay.set_talking("debora", True)
+    overlay.set_talking("debora", False)
+    assert overlay._slide_held is held
+    stopped = overlay._slide_offset("row", -100, 10.0)
+    # Cut short: it stays put; only buffer latency left: it finishes.
+    assert stopped == (-25 if held else -100)
+    overlay.show_speaking("resposta. mais", seconds=2.0)
+    assert not overlay._slide_held
+
+
 @pytest.mark.parametrize("scale", [1.0, 1.5, 2.0])
 def test_width_handle_clamps_and_saves_logical_pixels(scale):
     overlay = _overlay(scale)
