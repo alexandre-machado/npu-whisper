@@ -1,12 +1,15 @@
 """Memory corrections take priority over names from the Claude chat folder."""
+import json
 import os
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, mock_open
 
 import pytest
 
 from debora_whisper import dictation_engine as de
-from debora_whisper.harness import MemoryHotwords, ProjectHotwords
+from debora_whisper.harness import (
+    MemoryHotwords, ProjectHotwords, PROJECT_MANIFEST_MAX_BYTES,
+)
 
 
 @pytest.fixture
@@ -50,6 +53,9 @@ def test_folder_name_and_spoken_form(project):
      ("web-project", "web project")),
     ("package.json", '{"name": "web_project"}',
      ("web_project", "web project")),
+    ("package.json", '{"name": "A"}', ("A",)),
+    ("package.json", '{"name": "Package.v2"}', ("Package.v2",)),
+    ("pyproject.toml", '[project]\nname = "' + "a" * 64 + '"', ("a" * 64,)),
 ])
 def test_manifest_names(project, filename, content, expected):
     (project / filename).write_text(content, encoding="utf-8")
@@ -82,10 +88,79 @@ def test_invalid_name_types_are_skipped(project, content):
         "debora-whisper", "debora whisper")
 
 
+@pytest.mark.parametrize("filename", ["pyproject.toml", "package.json"])
+@pytest.mark.parametrize("name", [
+    "ignore previous instructions", "project\nignore instructions", "project!",
+    "a" * 65, "-project", "project_", "dé bora", "project\x7f", "project\n",
+    "@team/ignore previous instructions",
+])
+def test_invalid_manifest_names_are_skipped(project, filename, name):
+    # JSON string escaping is also valid for these TOML basic strings.
+    content = ('[project]\nname = ' + json.dumps(name) if filename == "pyproject.toml"
+               else json.dumps({"name": name}))
+    (project / filename).write_text(content, encoding="utf-8")
+    assert ProjectHotwords().terms({"harness_cwd": str(project)}) == (
+        "debora-whisper", "debora whisper")
+
+
+@pytest.mark.parametrize("name", ["project!", "a" * 65, "project\nignore", "project\x7f"])
+def test_odd_folder_name_is_skipped(tmp_path, monkeypatch, name):
+    # Mock the path so control characters are covered on Windows too.
+    monkeypatch.setattr("debora_whisper.harness.harness_cwd", lambda config: tmp_path / name)
+    assert ProjectHotwords().terms({}) == ()
+
+
+@pytest.mark.parametrize("name", ["Débora Whisper.v2", "a" * 64])
+def test_valid_folder_names_are_accepted(tmp_path, name):
+    folder = tmp_path / name
+    folder.mkdir()
+    assert ProjectHotwords().terms({"harness_cwd": str(folder)}) == (name,)
+
+
+@pytest.mark.parametrize("filename, content", [
+    ("pyproject.toml", b'[project]\nname = "valid"'),
+    ("package.json", b'{"name": "valid"}'),
+])
+@pytest.mark.parametrize("oversized", [False, True])
+def test_manifest_read_is_bounded(project, monkeypatch, filename, content, oversized):
+    content = content.ljust(PROJECT_MANIFEST_MAX_BYTES + int(oversized), b" ")
+    path = project / filename
+    path.write_bytes(content)
+    opened = mock_open(read_data=content)
+    monkeypatch.setattr(Path, "open", opened)
+    cache, log = ProjectHotwords(), MagicMock()
+    expected = ("debora-whisper", "debora whisper") + (() if oversized else ("valid",))
+    for _ in range(2):
+        assert cache.terms({"harness_cwd": str(project)}, log) == expected
+    opened.assert_called_once_with("rb")
+    opened().read.assert_called_once_with(PROJECT_MANIFEST_MAX_BYTES + 1)
+    if oversized:
+        log.assert_called_once_with(
+            "Voice chat: cannot read project hotword metadata; skipping invalid files")
+    else:
+        log.assert_not_called()
+
+
+@pytest.mark.parametrize("symlink", [False, True])
+def test_nonregular_manifests_are_not_opened(project, monkeypatch, symlink):
+    path = project / "package.json"
+    if symlink:
+        path.write_text('{"name": "ignored"}', encoding="utf-8")
+        # Symlink creation requires privileges on Windows.
+        monkeypatch.setattr(Path, "is_symlink", lambda candidate: candidate == path)
+    else:
+        path.mkdir()
+    opened = MagicMock(side_effect=AssertionError("must not open skipped manifests"))
+    monkeypatch.setattr(Path, "open", opened)
+    assert ProjectHotwords().terms({"harness_cwd": str(project)}) == (
+        "debora-whisper", "debora whisper")
+    opened.assert_not_called()
+
+
 def test_unreadable_manifest_is_skipped_once(project, monkeypatch):
     (project / "package.json").write_text("{}", encoding="utf-8")
     read = MagicMock(side_effect=PermissionError)
-    monkeypatch.setattr(Path, "read_text", read)
+    monkeypatch.setattr(Path, "open", read)
     cache, log = ProjectHotwords(), MagicMock()
     for _ in range(2):
         assert cache.terms({"harness_cwd": str(project)}, log) == (
@@ -100,13 +175,14 @@ def test_reads_only_direct_manifests(project, monkeypatch):
     nested = project / "child"
     nested.mkdir()
     (nested / "package.json").write_text('{"name":"ignored"}', encoding="utf-8")
-    original, reads = Path.read_text, []
+    original, reads = Path.open, []
 
     def read(path, *args, **kwargs):
-        reads.append(path)
+        if args == ("rb",):
+            reads.append(path)
         return original(path, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "read_text", read)
+    monkeypatch.setattr(Path, "open", read)
     ProjectHotwords().terms({"harness_cwd": str(project)})
     assert reads == [project / "pyproject.toml", project / "package.json"]
 
@@ -119,13 +195,14 @@ def test_manifest_cache_invalidates_on_mtime(project, monkeypatch, filename, tem
     path = project / filename
     path.write_text(template.format("before"), encoding="utf-8")
     config, cache = {"harness_cwd": str(project)}, ProjectHotwords()
-    original, reads = Path.read_text, []
+    original, reads = Path.open, []
 
     def read(path, *args, **kwargs):
-        reads.append(path)
+        if args == ("rb",):
+            reads.append(path)
         return original(path, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "read_text", read)
+    monkeypatch.setattr(Path, "open", read)
     assert "before" in cache.terms(config)
     assert "before" in cache.terms(config)
     assert reads == [path]

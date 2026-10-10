@@ -24,6 +24,7 @@ HARNESS_PROMPT = Path(__file__).with_name("harness_prompt.md")
 PERMISSION_MODES = ("acceptEdits", "auto", "bypassPermissions", "manual", "dontAsk", "plan")
 MEMORY_MAX_LINES = 100
 MEMORY_MAX_BYTES = 8192
+PROJECT_MANIFEST_MAX_BYTES = 256 * 1024
 # Exact forms deliberately avoid writable flags (git branch -D, --output,
 # nvidia-smi -pl) and indefinite reads (Get-Content -Wait).
 DEFAULT_ALLOWED_TOOLS = tuple(
@@ -160,29 +161,37 @@ class ProjectHotwords:
         mtimes = []
         for path in files:
             try:
-                mtimes.append(path.stat().st_mtime_ns)
+                mtimes.append(path.stat().st_mtime_ns
+                              if not path.is_symlink() and path.is_file() else None)
             except OSError:
                 mtimes.append(None)
         key = (folder, *mtimes)
         if key == self._key:
             return self._terms
         self._key, self._terms = key, ()
-        names, failed = [folder.name], False
+        names, failed = [], False
+        if len(folder.name) <= 64 and re.fullmatch(r"[\w .-]+", folder.name):
+            names.append(folder.name)
         for path, mtime in zip(files, mtimes):
             if mtime is None:
                 continue
             try:
-                text = path.read_text(encoding="utf-8")
+                with path.open("rb") as manifest:
+                    content = manifest.read(PROJECT_MANIFEST_MAX_BYTES + 1)
+                if len(content) > PROJECT_MANIFEST_MAX_BYTES:
+                    failed = True
+                    continue
+                text = content.decode("utf-8")
                 if path.name == "pyproject.toml":
                     data = tomllib.loads(text).get("project", {})
                 else:
                     data = json.loads(text)
                 name = data.get("name") if isinstance(data, dict) else None
-                if isinstance(name, str) and name.strip():
-                    name = name.strip()
+                if isinstance(name, str):
                     if path.name == "package.json" and name.startswith("@"):
                         name = name.partition("/")[2]
-                    names.append(name)
+                    if re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9._-]{0,62}[A-Za-z0-9])?", name):
+                        names.append(name)
             except (OSError, ValueError, RecursionError):
                 failed = True
         if failed:
