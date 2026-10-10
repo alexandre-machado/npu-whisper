@@ -12,6 +12,11 @@ import time
 import uuid
 from pathlib import Path
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10
+    import tomli as tomllib
+
 from debora_whisper import paths
 from debora_whisper.processes import NO_WINDOW, kill_tree
 
@@ -115,6 +120,84 @@ def memory_terms(text: str) -> list[str]:
     return terms
 
 
+def bounded_hotwords(terms) -> tuple[str, ...]:
+    kept, seen, tokens = [], set(), 0
+    for term in terms:
+        folded = term.casefold()
+        if folded in seen:
+            continue
+        seen.add(folded)
+        # UTF-8 bytes / 3 plus a separator leaves room below Whisper's
+        # ~224-token budget, without loading a tokenizer.
+        try:
+            cost = (len(term.encode("utf-8")) + 2) // 3 + 1
+        except UnicodeError:
+            continue
+        if tokens + cost > 150:
+            continue
+        kept.append(term)
+        tokens += cost
+        if len(kept) == 40:
+            break
+    return tuple(kept)
+
+
+class ProjectHotwords:
+    """Cache names from the harness folder and its two package manifests."""
+
+    def __init__(self):
+        self._key = None
+        self._terms = ()
+
+    def terms(self, config: dict, log=print) -> tuple[str, ...]:
+        try:
+            folder = harness_cwd(config)
+            if folder == Path.home().resolve():
+                return ()
+        except (OSError, ValueError, RuntimeError):
+            return ()
+        files = (folder / "pyproject.toml", folder / "package.json")
+        mtimes = []
+        for path in files:
+            try:
+                mtimes.append(path.stat().st_mtime_ns)
+            except OSError:
+                mtimes.append(None)
+        key = (folder, *mtimes)
+        if key == self._key:
+            return self._terms
+        self._key, self._terms = key, ()
+        names, failed = [folder.name], False
+        for path, mtime in zip(files, mtimes):
+            if mtime is None:
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+                if path.name == "pyproject.toml":
+                    data = tomllib.loads(text).get("project", {})
+                else:
+                    data = json.loads(text)
+                name = data.get("name") if isinstance(data, dict) else None
+                if isinstance(name, str) and name.strip():
+                    name = name.strip()
+                    if path.name == "package.json" and name.startswith("@"):
+                        name = name.partition("/")[2]
+                    names.append(name)
+            except (OSError, ValueError, RecursionError):
+                failed = True
+        if failed:
+            log("Voice chat: cannot read project hotword metadata; skipping invalid files")
+        terms = []
+        for name in names:
+            if name:
+                terms.append(name)
+                spoken = re.sub(r"[-_]+", " ", name).strip()
+                if spoken and spoken != name:
+                    terms.append(spoken)
+        self._terms = tuple(terms)
+        return self._terms
+
+
 class MemoryHotwords:
     """Cache a small, newest-first recognition vocabulary by file mtime."""
 
@@ -140,22 +223,7 @@ class MemoryHotwords:
             log(f"Voice chat: cannot read hotword memory ({type(e).__name__})")
             return self._terms
         # Reverse lines before extraction so repeated terms retain their latest entry.
-        terms, seen, tokens = [], set(), 0
-        for term in memory_terms("\n".join(reversed(text.splitlines()))):
-            folded = term.casefold()
-            if folded in seen:
-                continue
-            seen.add(folded)
-            # UTF-8 bytes / 3 plus a separator is a cheap, conservative estimate
-            # for project names; leave room below Whisper's ~224-token budget.
-            cost = (len(term.encode("utf-8")) + 2) // 3 + 1
-            if tokens + cost > 150:
-                continue
-            terms.append(term)
-            tokens += cost
-            if len(terms) == 40:
-                break
-        self._terms = tuple(terms)
+        self._terms = bounded_hotwords(memory_terms("\n".join(reversed(text.splitlines()))))
         return self._terms
 
 

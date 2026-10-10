@@ -20,7 +20,7 @@ from pathlib import Path
 from datetime import datetime
 
 from debora_whisper import paths
-from debora_whisper.harness import MemoryHotwords
+from debora_whisper.harness import MemoryHotwords, ProjectHotwords, bounded_hotwords
 from debora_whisper.solo_key import SoloKeyTap
 from debora_whisper.paths import CACHE_DIR, CONFIG_DIR, CONFIG_FILE, LOG_DIR, MODEL_DIR
 from debora_whisper.vad_endpoint import AdaptiveEndpoint, VadSegment
@@ -85,7 +85,7 @@ DEFAULT_CONFIG = {
     "harness_allowed_tools": None,  # null uses the packaged read-only diagnostics
     "harness_prompt_file": None,   # null: packaged voice-channel rules
     "harness_memory_file": None,   # null: ~/.debora/harness/voice_memory.md
-    "harness_hotwords": True,     # Voice memory hints only for Claude voice chat
+    "harness_hotwords": True,     # Memory/project hints only for Claude voice chat
     # Silence that ends a sentence in voice chat (dictation: 1.5 s, room to
     # think). The reply cannot start before it has passed.
     "voice_chat_end_silence_seconds": 0.8,
@@ -2644,6 +2644,7 @@ class DictationApp:
         self._continuous = bool(config.get("continuous_listening", False))
         self._recording_claude_chat = False
         self._memory_hotwords = MemoryHotwords()
+        self._project_hotwords = ProjectHotwords()
         self._hotword_terms = ()
         self._hotwords_unsupported = set()
         self._continuous_since = 0.0
@@ -3042,6 +3043,7 @@ class DictationApp:
 
     def _transcription_hotwords(self) -> dict:
         terms = ()
+        memory_count = 0
         if (self._recording_claude_chat and self._claude_voice_chat()
                 and self.config.get("harness_hotwords", True)):
             unsupported = (isinstance(self.whisper, ParakeetNPU)
@@ -3050,12 +3052,16 @@ class DictationApp:
             if unsupported:
                 backend = type(self.whisper).__name__
                 if backend not in self._hotwords_unsupported:
-                    log(f"Voice chat: {backend} has no hotword support; skipping memory hints")
+                    log(f"Voice chat: {backend} has no hotword support; skipping memory/project hints")
                     self._hotwords_unsupported.add(backend)
             else:
-                terms = self._memory_hotwords.terms(self.config, log)
+                memory = self._memory_hotwords.terms(self.config, log)
+                project = self._project_hotwords.terms(self.config, log)
+                terms = bounded_hotwords((*memory, *project))
+                memory_count = len(memory)
         if terms != self._hotword_terms:
-            log(f"Voice chat: using {len(terms)} memory hint terms")
+            log(f"Voice chat: using {memory_count} memory hint terms "
+                f"and {len(terms) - memory_count} project hint terms")
             self._hotword_terms = terms
         return {"hotwords": ", ".join(terms)} if terms else {}
 

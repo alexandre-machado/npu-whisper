@@ -260,6 +260,10 @@ directory; it does not restrict existing permissions or the working directory
 With `harness_hotwords: true` (default), Claude voice chat also feeds the corrected
 terms to Whisper as recognition hints: newest entries first, deduplicated ignoring
 case, capped at 40 terms / 150 estimated tokens and cached by file modification time.
+Project names from `harness_cwd` (the folder name, `[project].name` in `pyproject.toml`,
+and `name` in `package.json` without its scope) fill the remaining budget, including
+a spaced form of hyphenated/underscored names; the home folder is skipped.
+Project hints are cached by folder and both manifest modification times.
 Memory edits affect the next transcription without restarting Claude. The mode is
 captured when recording starts (including continuous listening); dictation and local
 Qwen receive no hints. Set it to `false` to disable. OpenVINO uses a hotwords string
