@@ -51,11 +51,22 @@ def harness_allowed_tools(config: dict) -> tuple[str, ...]:
     return DEFAULT_ALLOWED_TOOLS if rules is None else tuple(rules)
 
 
+def validate_session_name(name):
+    """Keep display names safe even when Windows resolves Claude to a batch file."""
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("harness_session_name must be a non-empty string")
+    if len(name) > 80 or any(not (c.isalpha() or c.isdecimal() or c in " ._-·:()")
+                             for c in name):
+        raise ValueError("harness_session_name must be at most 80 characters and contain only "
+                         "letters, digits, spaces and . _ - · : ( )")
+
+
 def harness_command(config: dict, session_id: str, resume: bool) -> list[str]:
     """Build argv; executable lookup and the dated prompt happen at launch."""
     command = ["claude", "-p", "--input-format", "stream-json",
                "--output-format", "stream-json", "--verbose", "--include-partial-messages",
                "--resume" if resume else "--session-id", session_id,
+               "--name", config.get("harness_session_name", "Débora Whisper"),
                "--permission-mode", config.get("harness_permission_mode", "acceptEdits"),
                "--permission-prompts", "host", "--permission-prompt-tool", "stdio",
                "--add-dir", str(harness_memory_file(config).parent),
@@ -89,7 +100,9 @@ def harness_key(config: dict) -> tuple:
             config.get("harness_permission_mode", "acceptEdits"),
             config.get("harness_prompt_file"), config.get("language"),
             config.get("harness_permission_response", "deny"),
-            os.path.normcase(str(harness_memory_file(config))), harness_allowed_tools(config))
+            os.path.normcase(str(harness_memory_file(config))), harness_allowed_tools(config),
+            config.get("harness_new_session_on_start", False),
+            config.get("harness_session_name", "Débora Whisper"))
 
 
 def voice_prompt(prompt: str, language: str | None, now: str) -> str:
@@ -278,10 +291,15 @@ def _sessions(path: Path, log) -> dict:
 
 
 _sessions_lock = threading.Lock()
+# Survives harness restarts, but never a restart of Débora. Include the store
+# path so independent session stores do not share conversations.
+# Store selection separately from confirmation that Claude saved a conversation.
+_run_sessions: dict[tuple[Path, str], tuple[str | None, bool]] = {}
 
 
 def _save_session(path: Path, cwd: str, session_id: str | None, log):
     with _sessions_lock:
+        _run_sessions[(path.resolve(), cwd)] = (session_id, session_id is not None)
         data = _sessions(path, log)
         if session_id is None:
             data.pop(cwd, None)
@@ -305,6 +323,7 @@ class HarnessSession:
     def __init__(self, config: dict, log=print, command_factory=harness_command,
                  process_factory=subprocess.Popen, session_file=None, on_event=None,
                  permission_handler=None):
+        validate_session_name(config.get("harness_session_name", "Débora Whisper"))
         self.config, self.log = dict(config), log
         self.key = harness_key(config)
         self.cwd = harness_cwd(config)
@@ -313,16 +332,25 @@ class HarnessSession:
             raise ValueError(f"Harness folder does not exist: {self.cwd}")
         self.on_event, self.permission_handler = on_event, permission_handler
         self.session_file = Path(session_file) if session_file else paths.CONFIG_DIR / "harness_session.json"
-        saved = _sessions(self.session_file, log).get(self.key[0])
+        run_key = (self.session_file.resolve(), self.key[0])
+        with _sessions_lock:
+            if run_key in _run_sessions:
+                saved, resumable = _run_sessions[run_key]
+            elif config.get("harness_new_session_on_start", False):
+                saved, resumable = None, False
+            else:
+                saved = _sessions(self.session_file, log).get(self.key[0])
+                resumable = bool(saved)
         try:
             saved = str(uuid.UUID(saved)) if saved else None
         except (TypeError, ValueError):
             log(f"Voice chat: ignoring an invalid saved Claude session {saved!r}")
             saved = None
+        resumable = bool(saved) and resumable
         self.session_id = saved or str(uuid.uuid4())
         # A resumed session that never completes a turn (expired, deleted)
         # is forgotten, so the next start is a new conversation.
-        self._resumed, self._confirmed = bool(saved), False
+        self._resumed, self._confirmed = resumable, False
         self.error: str | None = None
         self._events: queue.Queue = queue.Queue()
         self._send_lock = threading.Lock()
@@ -341,7 +369,7 @@ class HarnessSession:
                 self._prompt_file = Path(file.name)
                 file.write(prompt)
             command = command_factory({**config, "harness_prompt_file": str(self._prompt_file)},
-                                      self.session_id, bool(saved))
+                                      self.session_id, resumable)
             command[0] = shutil.which(command[0]) or command[0]
             self.process = process_factory(
                 command, cwd=str(self.cwd), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -350,10 +378,12 @@ class HarnessSession:
         except Exception:
             self._remove_prompt()
             raise
+        with _sessions_lock:
+            _run_sessions[run_key] = (self.session_id, resumable)
         threading.Thread(target=self._read, daemon=True).start()
         threading.Thread(target=self._read_stderr, daemon=True).start()
         log(f"Voice chat: Claude session {self.session_id} in {self.cwd} "
-            f"({'resume' if saved else 'new'}, pid {self.process.pid})")
+            f"({'resume' if resumable else 'new'}, pid {self.process.pid})")
 
     @property
     def running(self) -> bool:

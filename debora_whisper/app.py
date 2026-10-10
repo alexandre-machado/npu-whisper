@@ -411,6 +411,11 @@ class GUIApp:
                      "beep_on_start", "sample_rate", "max_record_seconds")
 
     def _on_settings_apply(self, new_config: dict):
+        try:
+            validate_config(new_config)
+        except ValueError as e:
+            self._settings_status(str(e), "#FF453A")
+            return
         model_changed = new_config["model_size"] != self._config["model_size"]
         voice_chat = new_config.get("voice_chat", self._config.get("voice_chat"))
         voice_chat_changed = bool(voice_chat) != bool(self._config.get("voice_chat"))
@@ -587,6 +592,9 @@ def main():
                              "instead of typing")
     parser.add_argument("--voice-chat-backend", choices=["local", "claude"], help="Voice chat backend")
     parser.add_argument("--harness-cwd", help="Claude Code folder (default: home)")
+    parser.add_argument("--harness-new-session-on-start", action=argparse.BooleanOptionalAction,
+                        default=None, help="Start a fresh Claude session on each Débora run")
+    parser.add_argument("--harness-session-name", help="Claude session display name")
     shortcut = parser.add_mutually_exclusive_group()
     shortcut.add_argument("--install-shortcut", action="store_true",
                           help="Add Débora Whisper to the Start Menu, then exit")
@@ -632,6 +640,10 @@ def main():
         config["voice_chat_backend"] = args.voice_chat_backend
     if args.harness_cwd is not None:
         config["harness_cwd"] = args.harness_cwd
+    if args.harness_new_session_on_start is not None:
+        config["harness_new_session_on_start"] = args.harness_new_session_on_start
+    if args.harness_session_name is not None:
+        config["harness_session_name"] = args.harness_session_name
 
     validate_config(config)
     rotate_logs()
