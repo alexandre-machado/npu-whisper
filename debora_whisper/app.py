@@ -13,7 +13,7 @@ import customtkinter as ctk
 
 from debora_whisper.dictation_engine import (
     AppState, DictationApp, MODEL_REGISTRY,
-    load_config, save_config, validate_config, log, create_model,
+    load_config, save_config, start_in_dictation, validate_config, log, create_model,
     is_model_downloaded, device_failure,
     apply_device_priority, avoid_lost_npu, detect_devices, rotate_logs, log_folder_moves,
     select_device,
@@ -57,6 +57,7 @@ class GUIApp:
             on_width_changed=self._on_width_changed,
         )
         self._overlay.set_show_balloon(config.get("show_balloon", True))
+        self._overlay.set_voice_mode(bool(config.get("voice_chat")))
         self._overlay.set_balloon_font_size(config.get("balloon_font_size", 16))
 
         # Tray
@@ -389,6 +390,8 @@ class GUIApp:
         The LLM loads in its own process, so even a hung load cannot freeze
         the app."""
         self._config["voice_chat"] = enabled
+        self._overlay.set_voice_mode(enabled)
+        self._tray.refresh()
         save_config(self._config)
         self._engine.set_voice_chat(enabled)
         if self._settings_win and self._settings_win.is_open:
@@ -449,6 +452,9 @@ class GUIApp:
             self._engine.set_voice_chat(bool(voice_chat))
 
         # Update balloon settings immediately (no engine restart needed)
+        self._overlay.set_voice_mode(bool(self._config.get("voice_chat")))
+        if voice_chat_changed:
+            self._tray.refresh()
         self._overlay.set_show_balloon(self._config.get("show_balloon", True))
         self._overlay.set_balloon_font_size(self._config.get("balloon_font_size", 16))
 
@@ -618,6 +624,7 @@ def main():
         config["continuous_listening"] = True
     if args.voice_chat:
         config["voice_chat"] = True
+    warm_voice_chat = start_in_dictation(config, voice_chat_requested=args.voice_chat)
     if args.voice_chat_backend:
         config["voice_chat_backend"] = args.voice_chat_backend
     if args.harness_cwd is not None:
@@ -630,6 +637,7 @@ def main():
     check_npu = avoid_lost_npu(config)
 
     app = GUIApp(config)
+    app._engine.warm_voice_chat = warm_voice_chat
     if check_npu:
         app._schedule_npu_recovery()
     app.run()

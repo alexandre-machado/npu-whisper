@@ -9,7 +9,7 @@ Débora Whisper (`debora-whisper`, formerly `npu-whisper`) is a local voice-to-t
 - **Packaging**: Code lives in the `debora_whisper` package (`app.py`, `dictation_engine.py`, `ui/`). `pyproject.toml` is the single source of dependencies (runtime by default; `cuda`, `export`, `test` extras) and defines the `debora` (tray app) and `debora-cli` commands. Users install with `uv tool install`; tagged `v*` releases publish to PyPI via `.github/workflows/release.yml`. The app must never pip-install at runtime.
 - **Hardware Fallback**: Models attempt to load on the requested hardware. If OpenCL/CUDA fails or devices are lost, the engine gracefully falls back (e.g., NPU -> GPU -> CPU).
 - **Parakeet Bucketing**: The Parakeet model requires static input shapes for OpenVINO NPU compilation, so it uses pre-compiled shape buckets for its encoder graph. The decoder runs on the GPU or CPU.
-- **Logging Subsystem**: Logs are split between `~/.debora/logs/app.log` (startup events, transcription timings, and hardware names) and `~/.debora/logs/telemetry.log` (background stats like CPU, RAM, VRAM, and audio buffer health).
+- **Logging Subsystem**: Logs are split between `~/.debora/logs/app.log` (startup events, transcription timings, and hardware names) and `~/.debora/logs/telemetry.log` (background stats like CPU, RAM, VRAM or NPU memory, and audio buffer health).
 - **NVIDIA GPU Integration**: The project uses a CPU-only PyTorch installation to save disk space. To support `faster-whisper` on CUDA, it dynamically loads NVIDIA DLLs installed via PyPI (`nvidia-cublas-cu12`, `nvidia-cudnn-cu12`). NVIDIA cards are detected via a subprocess call to `nvidia-smi`, bypassing `torch.cuda.is_available()`.
 
 ## Token-Efficient Workflow

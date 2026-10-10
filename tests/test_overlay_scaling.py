@@ -62,6 +62,48 @@ def _overlay(scale=1.0, state="ready"):
     return overlay
 
 
+@pytest.mark.parametrize("scale", [1.0, 1.25, 1.5, 2.0, 2.5])
+@pytest.mark.parametrize("state", ["ready", "recording", "processing", "speaking", "loading", "error"])
+def test_voice_mode_border_preserves_geometry(monkeypatch, scale, state):
+    from PIL import ImageChops
+    from debora_whisper.ui import overlay as ov
+    overlay = _overlay(scale, state)
+    overlay._text_canvas = Mock()
+    overlay._redraw = Mock(wraps=lambda: OverlayWindow._redraw(overlay))
+    monkeypatch.setattr(ov, "pil_to_photo", lambda image: image)
+    geometry = overlay._cur_w, overlay._cur_h, overlay._window_x, overlay._pos_y
+    text_geometry = overlay._text_geometry(overlay._cur_w)
+    overlay._win.reset_mock()
+    overlay._redraw()
+    original = overlay._photo_refs[0].copy()
+
+    overlay.set_voice_mode(True)
+    bordered = overlay._photo_refs[0].copy()
+    pad, height, right, outer = overlay._mascot_geometry()
+    changed = ImageChops.difference(original.convert("RGB"), bordered.convert("RGB")).getbbox()
+    assert changed is not None
+    # Along the balloon's edge around the mascot, never over the text.
+    assert 0 <= changed[0] < changed[2] <= outer
+    assert 0 <= changed[1] < changed[3] <= overlay._cur_h
+    rim = max(1, round(OverlayWindow.VOICE_RIM * scale))
+    x = (pad + right) // 2
+    assert max(bordered.convert("RGB").getpixel((x, 0))) < 40  # dark rim
+    r, g, b = bordered.convert("RGB").getpixel((x, rim + 1))
+    assert b > r > g  # purple just inside the rim
+    center = ((pad + right) // 2, pad + height // 2)
+    assert original.getpixel(center) == bordered.getpixel(center)
+
+    overlay._redraw.reset_mock()
+    overlay.set_voice_mode(True)
+    overlay._redraw.assert_not_called()
+    overlay.set_voice_mode(False)
+    overlay._redraw.assert_called_once()
+    assert overlay._photo_refs[0].tobytes() == original.tobytes()
+    assert (overlay._cur_w, overlay._cur_h, overlay._window_x, overlay._pos_y) == geometry
+    assert overlay._text_geometry(overlay._cur_w) == text_geometry
+    overlay._win.geometry.assert_not_called()
+
+
 def test_monitor_change_rescales_even_without_animation():
     overlay = _overlay(2.0)
     overlay.show_result("Visible transcription")

@@ -89,7 +89,8 @@ def test_audio_settings_restart_engine(key, value):
     new_engine.start_background.assert_called_once()
 
 
-def test_overlay_and_tray_toggle_follow_replaced_engine():
+@pytest.mark.parametrize("voice_chat", [False, True])
+def test_overlay_and_tray_toggle_follow_replaced_engine(voice_chat):
     """Settings replaces the engine; the overlay dot and the tray menu item
     must drive the new engine, not the stopped one they were built with."""
     from types import SimpleNamespace
@@ -109,15 +110,21 @@ def test_overlay_and_tray_toggle_follow_replaced_engine():
         def set_balloon_font_size(self, value):
             pass
 
+        def set_voice_mode(self, value):
+            captured["voice_mode"] = value
+
     first, second = MagicMock(), MagicMock()
     first.stop_if_idle.return_value = None
     factory = MagicMock(side_effect=[first, second])
     config = dict(DEFAULT_CONFIG)
+    config["voice_chat"] = voice_chat
     with patch.dict(g, {"ctk": MagicMock(), "DictationApp": factory,
                         "OverlayWindow": CapturingOverlay,
                         "save_config": MagicMock()}), \
             patch("debora_whisper.ui.icons.render_app_icon"), patch("PIL.ImageTk.PhotoImage"):
         app = GUIApp(config)  # real __init__ wiring
+        assert captured["voice_mode"] is voice_chat
+        assert app._tray._voice_chat_on() is voice_chat
         app._settings_win = None
         app._on_settings_apply({**config, "beep_on_start": not config["beep_on_start"]})
 
@@ -135,6 +142,23 @@ def test_overlay_and_tray_toggle_follow_replaced_engine():
 
     assert second.toggle_recording.call_count == 2
     first.toggle_recording.assert_not_called()
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_voice_mode_switch_updates_overlay_and_tray(enabled):
+    app = GUIApp.__new__(GUIApp)
+    app._config = {"voice_chat": not enabled}
+    app._overlay = MagicMock()
+    app._tray = MagicMock()
+    app._engine = MagicMock()
+    app._settings_win = MagicMock()
+    with patch.dict(GUIApp._set_voice_chat.__globals__, {"save_config": MagicMock()}):
+        app._set_voice_chat(enabled)
+    assert app._config["voice_chat"] is enabled
+    app._overlay.set_voice_mode.assert_called_once_with(enabled)
+    app._tray.refresh.assert_called_once_with()
+    app._engine.set_voice_chat.assert_called_once_with(enabled)
+    app._settings_win.set_voice_chat.assert_called_once_with(enabled)
 
 
 class _Stop:

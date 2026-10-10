@@ -44,6 +44,7 @@ class OverlayWindow:
     GREEN = "#30D158"
     RED = "#FF453A"
     VIOLET = "#8B5CF6"
+    VOICE_MODE_COLOR = "#A855F7"
     AMBER = "#FF9F0A"
     BLUE = "#0A84FF"
     GRAY = "#48484A"
@@ -118,6 +119,7 @@ class OverlayWindow:
 
         # State
         self._state = "loading"
+        self._voice_mode = False
         self._mascot_clip = "loop"
         self._mascot_index = 0
         self._mascot_anim_id = None
@@ -438,11 +440,13 @@ class OverlayWindow:
         frame = self._pill_cache.get(w, h, radius=round(self.RADIUS * s),
                                      **self._flat()).copy()
         self._sync_mascot_animation()
-        pad, mascot_h, _, _ = self._mascot_geometry()
+        pad, mascot_h, _, mascot_w = self._mascot_geometry()
         frames = self._mascot_frames(mascot_h, max(1, round(self.MASCOT_FEATHER * s)),
                                      max(1, round(self.RADIUS * s)), clip=self._mascot_clip)
         if frames:
             frame.alpha_composite(frames[self._mascot_index % len(frames)], (pad, pad))
+        if self._voice_mode:
+            frame.alpha_composite(self._voice_border(mascot_w, h, s), (0, 0))
         photo = pil_to_photo(composite_on_transparent(frame))
         self._photo_refs.append(photo)
         c.create_image(0, 0, image=photo, anchor="nw")
@@ -601,6 +605,42 @@ class OverlayWindow:
         self._set_grip_active(region == "resize")
 
     # --- Mascot -----------------------------------------------------------
+
+    VOICE_GLOW = 4  # logical px the voice mode's purple fades over, inward
+    VOICE_RIM = 1   # logical px of dark panel kept outside the purple
+
+    def _voice_border(self, width: int, height: int, s: float):
+        """The voice mode's purple glow around the mascot, fading inward.
+        The window's corners are a color key with no partial alpha, so they
+        are jagged; a dark rim stays outside the purple, whose curve is
+        supersampled and blurred to stay smooth against the panel. Cached
+        per size because _redraw runs on every mascot frame."""
+        cache = self.__dict__.setdefault("_border_cache", {})
+        key = (width, height, s)
+        if key not in cache:
+            from PIL import Image, ImageChops, ImageDraw, ImageFilter
+            ss = 4
+            radius = max(1, round(self.RADIUS * s)) * ss
+            rim = max(1, round(self.VOICE_RIM * s)) * ss
+            glow = max(2, round(self.VOICE_GLOW * s)) * ss
+            size = (width * ss, height * ss)
+
+            def rect(inset):
+                mask = Image.new("L", size)
+                ImageDraw.Draw(mask).rounded_rectangle(
+                    (inset, inset, size[0] - 1 - inset, size[1] - 1 - inset),
+                    radius=max(ss, radius - inset), fill=255)
+                return mask
+
+            outer = rect(rim).filter(ImageFilter.GaussianBlur(ss * 0.4))
+            inner = rect(rim + glow // 2).filter(ImageFilter.GaussianBlur(glow / 2))
+            alpha = ImageChops.subtract(outer, inner).resize(
+                (width, height), Image.LANCZOS).point(
+                lambda v: 0 if v < 8 else round(v * 0.9))
+            border = Image.new("RGBA", (width, height), self.VOICE_MODE_COLOR)
+            border.putalpha(alpha)
+            cache[key] = border
+        return cache[key]
 
     def _mascot_frames(self, height: int, feather: int = 0, radius: int = 0,
                        clip: str = "loop") -> list:
@@ -778,6 +818,12 @@ class OverlayWindow:
             self._finish_turn()
         self._set_state("error")
         self._update_layout()
+
+    def set_voice_mode(self, enabled: bool):
+        """Keep the mode visible even between turns."""
+        if self._voice_mode != enabled:
+            self._voice_mode = enabled
+            self._redraw()
 
     def set_show_balloon(self, enabled):
         """The Settings checkbox controls the in-window text area."""

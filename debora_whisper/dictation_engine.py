@@ -306,6 +306,20 @@ def save_config(config: dict):
     log(f"Config saved to {CONFIG_FILE}")
 
 
+def start_in_dictation(config: dict, voice_chat_requested: bool = False) -> bool:
+    """Opening already listening never starts in voice chat: speech would go
+    to the LLM before the user picked the mode. A Right Alt tap (or
+    --voice-chat) enters it. True when voice chat was switched off here, so
+    the caller still warms it up for that first tap."""
+    if (config.get("continuous_listening") and config.get("voice_chat")
+            and not voice_chat_requested):
+        config["voice_chat"] = False
+        log("Continuous listening at startup: starting in dictation; tap "
+            f"{config.get('voice_chat_hotkey') or 'the voice chat hotkey'} for voice chat.")
+        return True
+    return False
+
+
 def validate_config(config: dict):
     """Validate config values. Raises ValueError on invalid values."""
     width = config.get("balloon_width")
@@ -2596,6 +2610,9 @@ class DictationApp:
         # Called instead of set_voice_chat when the voice chat hotkey is
         # tapped, so the tray app can save and show the change. Must not block.
         self.on_voice_chat_toggle = None
+        # Load the TTS and the LLM at start even in dictation, so the first
+        # switch to voice chat answers at once (see start_in_dictation).
+        self.warm_voice_chat = False
         self._audio_lifecycle_lock = threading.Lock()
         self._stopping = threading.Event()
         # Orders the final "still running?" check plus paste/history against
@@ -2656,32 +2673,47 @@ class DictationApp:
         self._resource_thread = threading.Thread(target=self._monitor_resources, daemon=True)
         self._resource_thread.start()
 
+    def _accelerator_memory(self) -> str:
+        """The active accelerator's memory for the telemetry line: CUDA's
+        VRAM from nvidia-smi, or what this process holds on the NPU as
+        OpenVINO reports it (no Windows counters, so no NPU load %)."""
+        device = self.config.get("device")
+        try:
+            if device == "CUDA":
+                import subprocess
+                output = subprocess.check_output(
+                    ["nvidia-smi", "--query-gpu=memory.used,memory.total", "--format=csv,nounits,noheader"],
+                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+                ).decode("utf-8").strip()
+                used, total = (int(v) / 1024 for v in output.split(", "))
+                return f" VRAM {used:.1f}/{total:.1f}G"
+            if device == "NPU":
+                core = self.__dict__.get("_telemetry_core")
+                if core is None:
+                    import openvino as ov
+                    core = self._telemetry_core = ov.Core()
+                used = int(core.get_property("NPU", "NPU_DEVICE_ALLOC_MEM_SIZE"))
+                return f" NPU {used / 1024 ** 3:.1f}G"
+        except Exception:
+            pass
+        return ""
+
     def _monitor_resources(self):
-        """Continuously log CPU, RAM, and VRAM usage to telemetry."""
+        """Continuously log CPU, RAM, and VRAM/NPU memory to telemetry."""
         try:
             import psutil
-            import sys
             process = psutil.Process()
             while True:
                 cpu = psutil.cpu_percent(interval=5.0)
                 mem = process.memory_info().rss / (1024 * 1024)
                 sys_mem = psutil.virtual_memory().percent
                 
-                vram_info = ""
-                if self.config.get("device") == "CUDA":
-                    try:
-                        import subprocess
-                        output = subprocess.check_output(
-                            ["nvidia-smi", "--query-gpu=memory.used,memory.total", "--format=csv,nounits,noheader"],
-                            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-                        ).decode("utf-8").strip()
-                        used, total = output.split(", ")
-                        vram_info = f" | VRAM: {used}/{total}MB"
-                    except Exception:
-                        pass
-                
+                vram_info = self._accelerator_memory()
+
                 state_name = self._state.value if hasattr(self, "_state") else "UNKNOWN"
-                log(f"[Telemetry] State: {state_name} | CPU: {cpu:02.1f}% | App RAM: {mem:.0f}MB | Sys RAM: {sys_mem:02.1f}%{vram_info}")
+                # Short enough for an ~80-column console.
+                log(f"[Telemetry] {state_name:<10} CPU {cpu:3.0f}% RAM {mem:.0f}M "
+                    f"sys {sys_mem:.0f}%{vram_info}")
         except ImportError:
             log("[Telemetry] psutil not found. Resource monitoring disabled.")
         except Exception as e:
@@ -3516,7 +3548,7 @@ class DictationApp:
 
         log("Loading model in background (first time may take several minutes)...")
         self._start_loader()
-        if self.config.get("voice_chat"):
+        if self.config.get("voice_chat") or self.warm_voice_chat:
             self._warm_up_voice_chat()
         self._start_segment_consumer()
 
@@ -3756,7 +3788,7 @@ class DictationApp:
         log("Loading model in background (first time may take several minutes)...")
         load_thread = threading.Thread(target=self._load_model_background, daemon=True)
         load_thread.start()
-        if self.config.get("voice_chat"):
+        if self.config.get("voice_chat") or self.warm_voice_chat:
             self._warm_up_voice_chat()
         self._start_segment_consumer()
 
@@ -3888,6 +3920,7 @@ def main():
         config["continuous_listening"] = True
     if args.voice_chat:
         config["voice_chat"] = True
+    warm_voice_chat = start_in_dictation(config, voice_chat_requested=args.voice_chat)
     if args.voice_chat_backend:
         config["voice_chat_backend"] = args.voice_chat_backend
     if args.harness_cwd is not None:
@@ -3900,6 +3933,7 @@ def main():
     avoid_lost_npu(config)
 
     app = DictationApp(config)
+    app.warm_voice_chat = warm_voice_chat
     app.run()
 
 

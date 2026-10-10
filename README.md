@@ -174,7 +174,11 @@ and records the device last chosen.
 
 `voice_chat_hotkey` switches voice chat on and off when tapped alone (pressed
 and released with no other key). It is never blocked, so AltGr combinations
-such as AltGr+Q still type. Set it to `""` to turn it off.
+such as AltGr+Q still type. Set it to `""` to turn it off. The tray shows the mode
+while listening: green bars for dictation, purple for voice chat; the balloon
+gets a purple border in voice chat. When the app starts already listening
+(`continuous_listening`), it always starts in dictation unless `--voice-chat`
+is given.
 
 `tap_action` is what a short hotkey press does: `continuous` (default) starts
 continuous listening, `toggle` starts a recording that the next press stops.

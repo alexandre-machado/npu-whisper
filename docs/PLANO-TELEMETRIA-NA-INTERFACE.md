@@ -39,7 +39,9 @@ situação.
 - `log()` (`dictation_engine.py`) faz `print()` de tudo e grava em
   `~/.debora/logs/app.log` ou `telemetry.log`.
 - A telemetria é só texto: a cada 5 s uma linha com estado, CPU, RAM do app,
-  RAM do sistema e VRAM.
+  RAM do sistema e VRAM (CUDA) ou memória alocada na NPU, que o OpenVINO
+  informa; a ocupação % da NPU só existe nos contadores do Windows e fica de
+  fora.
 - Pelo atalho do menu Iniciar o app abre com `pythonw`, que não tem console.
   Quem não abre o terminal não vê nada disso.
 

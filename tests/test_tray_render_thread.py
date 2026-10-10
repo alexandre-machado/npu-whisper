@@ -10,6 +10,8 @@ import threading
 import time
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 
 def _tray_class():
     try:
@@ -72,6 +74,7 @@ def test_updates_do_not_touch_pystray_on_caller_thread():
     tray.update_state("recording", "Débora Whisper — Recording...")
     tray.update_audio_level(0.8)
     tray.update_state("ready", "Débora Whisper — Ready")
+    tray.refresh()
     assert tray._icon.calls == []
 
 
@@ -117,6 +120,28 @@ def test_silent_recording_does_not_redraw():
         tray._icon.calls.clear()
         time.sleep(0.5)  # five 100ms frames of silence
         assert tray._icon.calls == []
+    finally:
+        tray.stop()
+        t.join(1)
+
+
+@pytest.mark.parametrize("state", ["ready", "recording"])
+def test_mode_switch_refreshes_icon_and_menu_on_renderer(state):
+    from debora_whisper.ui.icons import get_icon
+    tray = _tray()
+    enabled = False
+    tray._voice_chat_on = lambda: enabled
+    tray.update_state(state)
+    t = _run_renderer(tray)
+    try:
+        _settle(tray._icon)
+        for enabled in (True, False):
+            tray._icon.calls.clear()
+            tray.refresh()
+            _settle(tray._icon)
+            assert tray._icon.icon is get_icon(state, voice_chat=enabled)
+            assert ("update_menu", "tray-render") in tray._icon.calls
+            assert {thread for _, thread in tray._icon.calls} == {"tray-render"}
     finally:
         tray.stop()
         t.join(1)
