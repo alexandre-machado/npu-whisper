@@ -20,7 +20,8 @@ from pathlib import Path
 from datetime import datetime
 
 from debora_whisper import paths
-from debora_whisper.harness import MemoryHotwords
+from debora_whisper.harness import MemoryHotwords, ProjectHotwords, bounded_hotwords
+from debora_whisper.solo_key import SoloKeyTap
 from debora_whisper.paths import CACHE_DIR, CONFIG_DIR, CONFIG_FILE, LOG_DIR, MODEL_DIR
 from debora_whisper.vad_endpoint import AdaptiveEndpoint, VadSegment
 from debora_whisper.voice_chat import (VoiceChat, download_llm, ensure_tts_server, is_http_url,
@@ -51,6 +52,7 @@ DEFAULT_CONFIG = {
     "model_size": "turbo",     # see MODEL_REGISTRY; turbo: large-v3-turbo
     "language": "en",          # Language code or "auto"
     "hotkey": "ctrl+space",    # Global hotkey to toggle recording
+    "voice_chat_hotkey": "right alt",  # Tapped alone, switches voice chat; "" disables
     "auto_enter": False,       # Press Enter after pasting (useful for Claude Code)
     # Continuous drafts: shown in the overlay only, or also typed into the
     # target and rewritten with Shift+Left. Rewriting assumes the editor
@@ -78,12 +80,14 @@ DEFAULT_CONFIG = {
     "voice_chat_backend": "local",  # local (Qwen/OpenVINO) or claude
     "harness_cwd": None,           # null: the user's home directory
     "harness_model": None,         # null: Claude Code's default
+    "harness_new_session_on_start": False,  # Fresh per folder on each Débora run
+    "harness_session_name": "Débora Whisper",  # Claude's display name, including resumes
     "harness_permission_mode": "acceptEdits",
     "harness_permission_response": "deny",  # requests not already allowed by Claude
     "harness_allowed_tools": None,  # null uses the packaged read-only diagnostics
     "harness_prompt_file": None,   # null: packaged voice-channel rules
     "harness_memory_file": None,   # null: ~/.debora/harness/voice_memory.md
-    "harness_hotwords": True,     # Voice memory hints only for Claude voice chat
+    "harness_hotwords": True,     # Memory/project hints only for Claude voice chat
     # Silence that ends a sentence in voice chat (dictation: 1.5 s, room to
     # think). The reply cannot start before it has passed.
     "voice_chat_end_silence_seconds": 0.8,
@@ -298,10 +302,34 @@ def load_config() -> dict:
 
 
 def save_config(config: dict):
+    config = dict(config)
+    if "_saved_voice_chat" in config:
+        config["voice_chat"] = config.pop("_saved_voice_chat")
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     with open(CONFIG_FILE, "w") as f:
         json.dump(config, f, indent=2)
     log(f"Config saved to {CONFIG_FILE}")
+
+
+def start_in_dictation(config: dict, voice_chat_requested: bool = False) -> bool:
+    """Opening already listening never starts in voice chat: speech would go
+    to the LLM before the user picked the mode. A Right Alt tap (or
+    --voice-chat) enters it. True when voice chat was switched off here, so
+    the caller still warms it up for that first tap."""
+    if (config.get("continuous_listening") and config.get("voice_chat")
+            and not voice_chat_requested):
+        config["_saved_voice_chat"] = config["voice_chat"]
+        config["voice_chat"] = False
+        log("Continuous listening at startup: starting in dictation; tap "
+            f"{config.get('voice_chat_hotkey') or 'the voice chat hotkey'} for voice chat.")
+        return True
+    return False
+
+
+def set_voice_chat_config(config: dict, enabled: bool):
+    """An explicit mode choice replaces the saved startup preference."""
+    config.pop("_saved_voice_chat", None)
+    config["voice_chat"] = bool(enabled)
 
 
 def validate_config(config: dict):
@@ -347,8 +375,16 @@ def validate_config(config: dict):
             raise ValueError(f"{key} must be a non-empty string, got {value!r}")
     if config.get("voice_chat_backend", "local") not in ("local", "claude"):
         raise ValueError("voice_chat_backend must be local or claude")
+    if not isinstance(config.get("voice_chat_hotkey", ""), str):
+        raise ValueError("voice_chat_hotkey must be a string")
+    if any(separator in config.get("voice_chat_hotkey", "") for separator in ("+", ",")):
+        raise ValueError('voice_chat_hotkey must be a single key or "" to disable')
     if not isinstance(config.get("harness_hotwords", True), bool):
         raise ValueError("harness_hotwords must be a bool")
+    if not isinstance(config.get("harness_new_session_on_start", False), bool):
+        raise ValueError("harness_new_session_on_start must be a bool")
+    from debora_whisper.harness import validate_session_name
+    validate_session_name(config.get("harness_session_name", "Débora Whisper"))
     for key in ("harness_cwd", "harness_model", "harness_prompt_file", "harness_memory_file"):
         value = config.get(key)
         if value is not None and (not isinstance(value, str) or not value.strip()):
@@ -2589,6 +2625,12 @@ class DictationApp:
             config=config,
         )
         self.chimes = ChimePlayer()
+        # Called instead of set_voice_chat when the voice chat hotkey is
+        # tapped, so the tray app can save and show the change. Must not block.
+        self.on_voice_chat_toggle = None
+        # Load the TTS and the LLM at start even in dictation, so the first
+        # switch to voice chat answers at once (see start_in_dictation).
+        self.warm_voice_chat = False
         self._audio_lifecycle_lock = threading.Lock()
         self._stopping = threading.Event()
         # Orders the final "still running?" check plus paste/history against
@@ -2608,6 +2650,7 @@ class DictationApp:
         self._continuous = bool(config.get("continuous_listening", False))
         self._recording_claude_chat = False
         self._memory_hotwords = MemoryHotwords()
+        self._project_hotwords = ProjectHotwords()
         self._hotword_terms = ()
         self._hotwords_unsupported = set()
         self._continuous_since = 0.0
@@ -2649,32 +2692,47 @@ class DictationApp:
         self._resource_thread = threading.Thread(target=self._monitor_resources, daemon=True)
         self._resource_thread.start()
 
+    def _accelerator_memory(self) -> str:
+        """The active accelerator's memory for the telemetry line: CUDA's
+        VRAM from nvidia-smi, or what this process holds on the NPU as
+        OpenVINO reports it (no Windows counters, so no NPU load %)."""
+        device = self.config.get("device")
+        try:
+            if device == "CUDA":
+                import subprocess
+                output = subprocess.check_output(
+                    ["nvidia-smi", "--query-gpu=memory.used,memory.total", "--format=csv,nounits,noheader"],
+                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+                ).decode("utf-8").strip()
+                used, total = (int(v) / 1024 for v in output.split(", "))
+                return f" VRAM {used:.1f}/{total:.1f}G"
+            if device == "NPU":
+                core = self.__dict__.get("_telemetry_core")
+                if core is None:
+                    import openvino as ov
+                    core = self._telemetry_core = ov.Core()
+                used = int(core.get_property("NPU", "NPU_DEVICE_ALLOC_MEM_SIZE"))
+                return f" NPU {used / 1024 ** 3:.1f}G"
+        except Exception:
+            pass
+        return ""
+
     def _monitor_resources(self):
-        """Continuously log CPU, RAM, and VRAM usage to telemetry."""
+        """Continuously log CPU, RAM, and VRAM/NPU memory to telemetry."""
         try:
             import psutil
-            import sys
             process = psutil.Process()
             while True:
                 cpu = psutil.cpu_percent(interval=5.0)
                 mem = process.memory_info().rss / (1024 * 1024)
                 sys_mem = psutil.virtual_memory().percent
                 
-                vram_info = ""
-                if self.config.get("device") == "CUDA":
-                    try:
-                        import subprocess
-                        output = subprocess.check_output(
-                            ["nvidia-smi", "--query-gpu=memory.used,memory.total", "--format=csv,nounits,noheader"],
-                            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-                        ).decode("utf-8").strip()
-                        used, total = output.split(", ")
-                        vram_info = f" | VRAM: {used}/{total}MB"
-                    except Exception:
-                        pass
-                
+                vram_info = self._accelerator_memory()
+
                 state_name = self._state.value if hasattr(self, "_state") else "UNKNOWN"
-                log(f"[Telemetry] State: {state_name} | CPU: {cpu:02.1f}% | App RAM: {mem:.0f}MB | Sys RAM: {sys_mem:02.1f}%{vram_info}")
+                # Short enough for an ~80-column console.
+                log(f"[Telemetry] {state_name:<10} CPU {cpu:3.0f}% RAM {mem:.0f}M "
+                    f"sys {sys_mem:.0f}%{vram_info}")
         except ImportError:
             log("[Telemetry] psutil not found. Resource monitoring disabled.")
         except Exception as e:
@@ -2991,6 +3049,7 @@ class DictationApp:
 
     def _transcription_hotwords(self) -> dict:
         terms = ()
+        memory_count = 0
         if (self._recording_claude_chat and self._claude_voice_chat()
                 and self.config.get("harness_hotwords", True)):
             unsupported = (isinstance(self.whisper, ParakeetNPU)
@@ -2999,12 +3058,16 @@ class DictationApp:
             if unsupported:
                 backend = type(self.whisper).__name__
                 if backend not in self._hotwords_unsupported:
-                    log(f"Voice chat: {backend} has no hotword support; skipping memory hints")
+                    log(f"Voice chat: {backend} has no hotword support; skipping memory/project hints")
                     self._hotwords_unsupported.add(backend)
             else:
-                terms = self._memory_hotwords.terms(self.config, log)
+                memory = self._memory_hotwords.terms(self.config, log)
+                project = self._project_hotwords.terms(self.config, log)
+                terms = bounded_hotwords((*memory, *project))
+                memory_count = len(memory)
         if terms != self._hotword_terms:
-            log(f"Voice chat: using {len(terms)} memory hint terms")
+            log(f"Voice chat: using {memory_count} memory hint terms "
+                f"and {len(terms) - memory_count} project hint terms")
             self._hotword_terms = terms
         return {"hotwords": ", ".join(terms)} if terms else {}
 
@@ -3279,9 +3342,12 @@ class DictationApp:
             try:
                 self._set_state(AppState.PROCESSING, {"user_text": text})
 
-                def on_reply(reply):
+                def on_reply(reply, seconds=None):
                     if not stop.is_set() and not self._stopping.is_set():
-                        self._set_state(AppState.SPEAKING, {"text": reply})
+                        data = {"text": reply}
+                        if seconds:
+                            data["seconds"] = seconds  # the newest sentence's audio
+                        self._set_state(AppState.SPEAKING, data)
 
                 reply = self.voice_chat.respond(text, on_reply=on_reply, stop=stop)
                 if (not reply and entry["voice_chat_status"] != "interrupted"
@@ -3463,6 +3529,17 @@ class DictationApp:
             threading.Thread(target=self._stop_continuous_when_idle,
                              args=(self._continuous_since, idle), daemon=True).start()
 
+    def start_listening(self):
+        """A mode switch opens continuous listening, whatever tap_action is;
+        the hotkey alone still stops it. No-op if the microphone is busy."""
+        if (self._stopping.is_set() or self._continuous or self.is_recording
+                or self._transcribing or getattr(self, "_hotkey_held", False)):
+            return
+        press_time = time.time()
+        self._start_recording(time.perf_counter())
+        if self.is_recording:
+            self._begin_continuous(press_time)
+
     def _stop_continuous_when_idle(self, session, idle_seconds, poll=1.0):
         """A stray tap must not leave the microphone open indefinitely."""
         while not self._stopping.wait(poll):
@@ -3505,18 +3582,43 @@ class DictationApp:
         hotkey = self.config["hotkey"]
         keyboard.add_hotkey(hotkey, self.toggle_recording, suppress=True)
         log(f"Hotkey {hotkey} registered.")
+        self._register_voice_chat_hotkey(keyboard)
 
         log("Loading model in background (first time may take several minutes)...")
         self._start_loader()
-        if self.config.get("voice_chat"):
+        if self.config.get("voice_chat") or self.warm_voice_chat:
             self._warm_up_voice_chat()
         self._start_segment_consumer()
 
-    def set_voice_chat(self, enabled: bool):
+    def _register_voice_chat_hotkey(self, keyboard):
+        key = self.config.get("voice_chat_hotkey", "").strip()
+        if not key:
+            return
+        try:
+            keyboard.key_to_scan_codes(key)
+        except ValueError:
+            log(f"Voice chat hotkey {key!r} is not a key; voice chat hotkey disabled.")
+            return
+        keyboard.hook(SoloKeyTap(key, self._on_voice_chat_hotkey).handle)
+        log(f"Voice chat hotkey {key} registered (tap it alone).")
+
+    def _on_voice_chat_hotkey(self):
+        """On the keyboard hook's thread, which must return quickly."""
+        if self.on_voice_chat_toggle:
+            self.on_voice_chat_toggle()
+        else:
+            enabled = not self.config.get("voice_chat")
+            threading.Thread(target=self.set_voice_chat, args=(enabled, True),
+                             daemon=True).start()
+
+    def set_voice_chat(self, enabled: bool, listen: bool = False):
         """Switch voice chat while running. On: the TTS server and the LLM
         load in the background. Off: the reply in progress stops. Both stay
-        loaded either way, so switching back is instant."""
-        self.config["voice_chat"] = bool(enabled)
+        loaded either way, so switching back is instant. With `listen` (the
+        mode hotkey or tray), an idle microphone starts continuous listening."""
+        set_voice_chat_config(self.config, enabled)
+        if listen:
+            threading.Thread(target=self.start_listening, daemon=True).start()
         if enabled:
             log("Voice chat on.")
             self._warm_up_voice_chat()
@@ -3726,12 +3828,13 @@ class DictationApp:
 
         # Register global hotkey immediately so it's responsive during loading
         keyboard.add_hotkey(hotkey, self.toggle_recording, suppress=True)
+        self._register_voice_chat_hotkey(keyboard)
 
         # Load model in background so hotkey is responsive during load
         log("Loading model in background (first time may take several minutes)...")
         load_thread = threading.Thread(target=self._load_model_background, daemon=True)
         load_thread.start()
-        if self.config.get("voice_chat"):
+        if self.config.get("voice_chat") or self.warm_voice_chat:
             self._warm_up_voice_chat()
         self._start_segment_consumer()
 
@@ -3839,6 +3942,9 @@ def main():
                              "instead of typing")
     parser.add_argument("--voice-chat-backend", choices=["local", "claude"], help="Voice chat backend")
     parser.add_argument("--harness-cwd", help="Claude Code folder (default: home)")
+    parser.add_argument("--harness-new-session-on-start", action=argparse.BooleanOptionalAction,
+                        default=None, help="Start a fresh Claude session on each Débora run")
+    parser.add_argument("--harness-session-name", help="Claude session display name")
     args = parser.parse_args()
     log_folder_moves()
 
@@ -3863,10 +3969,15 @@ def main():
         config["continuous_listening"] = True
     if args.voice_chat:
         config["voice_chat"] = True
+    warm_voice_chat = start_in_dictation(config, voice_chat_requested=args.voice_chat)
     if args.voice_chat_backend:
         config["voice_chat_backend"] = args.voice_chat_backend
     if args.harness_cwd is not None:
         config["harness_cwd"] = args.harness_cwd
+    if args.harness_new_session_on_start is not None:
+        config["harness_new_session_on_start"] = args.harness_new_session_on_start
+    if args.harness_session_name is not None:
+        config["harness_session_name"] = args.harness_session_name
 
     validate_config(config)
     rotate_logs()
@@ -3875,6 +3986,7 @@ def main():
     avoid_lost_npu(config)
 
     app = DictationApp(config)
+    app.warm_voice_chat = warm_voice_chat
     app.run()
 
 

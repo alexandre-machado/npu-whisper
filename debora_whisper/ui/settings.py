@@ -360,6 +360,23 @@ class SettingsWindow:
             fg_color=_BTN_SEC_BG, hover_color=_BTN_SEC_HOVER, text_color=_BTN_SEC_TEXT,
         ).pack(side="left", padx=(6, 0))
 
+        self._harness_new_session_var = ctk.BooleanVar(
+            value=self._config.get("harness_new_session_on_start", False))
+        ctk.CTkCheckBox(
+            toggles_frame, text="New Claude conversation on each Débora start",
+            variable=self._harness_new_session_var, **chk_opts,
+        ).pack(anchor="w", pady=2)
+        ctk.CTkLabel(
+            toggles_frame, text="Claude session name", text_color=_SECTION_TEXT,
+            font=ctk.CTkFont(size=13, weight="bold"),
+        ).pack(anchor="w", pady=(4, 0))
+        self._harness_session_name_var = ctk.StringVar(
+            value=self._config.get("harness_session_name", "Débora Whisper"))
+        ctk.CTkEntry(
+            toggles_frame, textvariable=self._harness_session_name_var,
+            fg_color=_INPUT_BG, border_color=_INPUT_BORDER, text_color=_DESC_TEXT,
+        ).pack(fill="x", pady=(4, 8))
+
         self._balloon_var = ctk.BooleanVar(value=self._config.get("show_balloon", True))
         ctk.CTkCheckBox(
             toggles_frame, text="Show text balloon after transcription",
@@ -503,6 +520,8 @@ class SettingsWindow:
         new_config["voice_chat"] = self._voice_chat_var.get()
         new_config["voice_chat_backend"] = "claude" if self._backend_var.get() == "Claude Code" else "local"
         new_config["harness_cwd"] = self._harness_cwd
+        new_config["harness_new_session_on_start"] = self._harness_new_session_var.get()
+        new_config["harness_session_name"] = self._harness_session_name_var.get()
         voice = self._voice_var.get()
         new_config["tts_voice"] = None if voice == _DEFAULT_VOICE else voice
         new_config["show_balloon"] = self._balloon_var.get()
@@ -517,6 +536,12 @@ class SettingsWindow:
     def _apply(self):
         """Apply settings without closing the window."""
         new_config = self._get_new_config()
+        from debora_whisper.dictation_engine import validate_config
+        try:
+            validate_config(new_config)
+        except ValueError as e:
+            self.update_status(str(e), "#FF453A")
+            return
         self._config = dict(new_config)
         if self._on_apply:
             self._on_apply(new_config)

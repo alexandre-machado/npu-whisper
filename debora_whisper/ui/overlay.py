@@ -44,6 +44,7 @@ class OverlayWindow:
     GREEN = "#30D158"
     RED = "#FF453A"
     VIOLET = "#8B5CF6"
+    VOICE_MODE_COLOR = "#A855F7"
     AMBER = "#FF9F0A"
     BLUE = "#0A84FF"
     GRAY = "#48484A"
@@ -68,6 +69,9 @@ class OverlayWindow:
     BALLOON_FONT_SIZE = 16
     BALLOON_DURATION = 2500  # the former result -> ready auto-dismiss delay
     SLIDE_SECONDS = 0.2
+    # A sentence whose audio stops with more left to slide than this was cut
+    # short (interrupted); less is just the output device's buffer latency.
+    SLIDE_CUT_SECONDS = 0.3
     # While she works on the input, the text breathes between these
     # opacities over the panel, once per period.
     PULSE_SECONDS = 1.4
@@ -118,6 +122,7 @@ class OverlayWindow:
 
         # State
         self._state = "loading"
+        self._voice_mode = False
         self._mascot_clip = "loop"
         self._mascot_index = 0
         self._mascot_anim_id = None
@@ -131,6 +136,8 @@ class OverlayWindow:
         self._show_balloon = True
         self._slide_id = None
         self._slides = {}
+        self._pace = None  # audio seconds for the next slide (show_speaking)
+        self._slide_held = False
         self._grip_level = 0  # 0 idle .. GRIP_STEPS active
         self._grip_hover = False
         self._grip_fade_id = None
@@ -438,11 +445,13 @@ class OverlayWindow:
         frame = self._pill_cache.get(w, h, radius=round(self.RADIUS * s),
                                      **self._flat()).copy()
         self._sync_mascot_animation()
-        pad, mascot_h, _, _ = self._mascot_geometry()
+        pad, mascot_h, _, mascot_w = self._mascot_geometry()
         frames = self._mascot_frames(mascot_h, max(1, round(self.MASCOT_FEATHER * s)),
                                      max(1, round(self.RADIUS * s)), clip=self._mascot_clip)
         if frames:
             frame.alpha_composite(frames[self._mascot_index % len(frames)], (pad, pad))
+        if self._voice_mode:
+            frame.alpha_composite(self._voice_border(mascot_w, h, s), (0, 0))
         photo = pil_to_photo(composite_on_transparent(frame))
         self._photo_refs.append(photo)
         c.create_image(0, 0, image=photo, anchor="nw")
@@ -460,19 +469,38 @@ class OverlayWindow:
     def _line_target(line_width, visible_width):
         return min(0, visible_width - line_width)
 
+    def _slide_position(self, slide, now):
+        start, end, began, pace = slide
+        if pace:
+            # Her sentence: a steady teleprompter pace, so its last word
+            # comes into view as she finishes saying it.
+            return start + (end - start) * min(1.0, max(0.0, (now - began) / pace))
+        progress = min(1.0, max(0.0, (now - began) / self.SLIDE_SECONDS))
+        return start + (end - start) * (1 - (1 - progress) ** 3)
+
     def _slide_offset(self, key, target, now):
         slide = self._slides.get(key)
         if slide is None:
-            slide = (0.0, 0.0, now)
-        start, end, began = slide
-        progress = min(1.0, max(0.0, (now - began) / self.SLIDE_SECONDS))
-        current = start + (end - start) * (1 - (1 - progress) ** 3)
-        if target != end:
+            slide = (0.0, 0.0, now, None)
+        current = self._slide_position(slide, now)
+        if target != slide[1] and not self._slide_held:
             # Retarget from the current position, even if another sentence
             # arrived before the last animation finished.
-            slide = (current, target, now)
+            slide = (current, target, now, self._pace)
         self._slides[key] = slide
         return current
+
+    def _hold_cut_slide(self):
+        """Her voice stopped: an interrupted sentence stops sliding where
+        it is, instead of rushing to its end."""
+        slide = self._slides.get("row")
+        if slide is None or not slide[3]:
+            return
+        now = monotonic()
+        if slide[2] + slide[3] - now > self.SLIDE_CUT_SECONDS:
+            current = self._slide_position(slide, now)
+            self._slides["row"] = (current, current, now, None)
+            self._slide_held = True
 
     def _draw_text(self, visible_width):
         canvas = self._text_canvas
@@ -502,9 +530,10 @@ class OverlayWindow:
         width = max(0, x - space)
         target = self._line_target(width, visible_width)
         offset = self._slide_offset("row", target, now)
+        self._pace = None  # only the sentence it came with
         for item in items:
             canvas.move(item, offset, 0)
-        moving = abs(offset - target) > 0.01
+        moving = not self._slide_held and abs(offset - target) > 0.01
         if (moving or pulsing) and self._slide_id is None:
             self._slide_id = self._root.after(16 if moving else 50, self._slide_tick)
 
@@ -527,6 +556,7 @@ class OverlayWindow:
             self._root.after_cancel(self._slide_id)
             self._slide_id = None
         self._slides.clear()
+        self._slide_held = False
 
     def _update_layout(self):
         self._position()
@@ -601,6 +631,42 @@ class OverlayWindow:
         self._set_grip_active(region == "resize")
 
     # --- Mascot -----------------------------------------------------------
+
+    VOICE_GLOW = 4  # logical px the voice mode's purple fades over, inward
+    VOICE_RIM = 1   # logical px of dark panel kept outside the purple
+
+    def _voice_border(self, width: int, height: int, s: float):
+        """The voice mode's purple glow around the mascot, fading inward.
+        The window's corners are a color key with no partial alpha, so they
+        are jagged; a dark rim stays outside the purple, whose curve is
+        supersampled and blurred to stay smooth against the panel. Cached
+        per size because _redraw runs on every mascot frame."""
+        cache = self.__dict__.setdefault("_border_cache", {})
+        key = (width, height, s)
+        if key not in cache:
+            from PIL import Image, ImageChops, ImageDraw, ImageFilter
+            ss = 4
+            radius = max(1, round(self.RADIUS * s)) * ss
+            rim = max(1, round(self.VOICE_RIM * s)) * ss
+            glow = max(2, round(self.VOICE_GLOW * s)) * ss
+            size = (width * ss, height * ss)
+
+            def rect(inset):
+                mask = Image.new("L", size)
+                ImageDraw.Draw(mask).rounded_rectangle(
+                    (inset, inset, size[0] - 1 - inset, size[1] - 1 - inset),
+                    radius=max(ss, radius - inset), fill=255)
+                return mask
+
+            outer = rect(rim).filter(ImageFilter.GaussianBlur(ss * 0.4))
+            inner = rect(rim + glow // 2).filter(ImageFilter.GaussianBlur(glow / 2))
+            alpha = ImageChops.subtract(outer, inner).resize(
+                (width, height), Image.LANCZOS).point(
+                lambda v: 0 if v < 8 else round(v * 0.9))
+            border = Image.new("RGBA", (width, height), self.VOICE_MODE_COLOR)
+            border.putalpha(alpha)
+            cache[key] = border
+        return cache[key]
 
     def _mascot_frames(self, height: int, feather: int = 0, radius: int = 0,
                        clip: str = "loop") -> list:
@@ -683,6 +749,8 @@ class OverlayWindow:
         (talking.add if active else talking.discard)(who)
         if who == "debora" and active:
             self._voice_heard = True
+        elif who == "debora":
+            self._hold_cut_slide()
         if talking and not was and self._mascot_clip == "loop":
             self._mascot_clip, self._mascot_index = "zoom", 0
             if self._state not in self._MASCOT_STILL_STATES:
@@ -763,10 +831,14 @@ class OverlayWindow:
         self._finish_turn()
         self._update_layout()
 
-    def show_speaking(self, text):
+    def show_speaking(self, text, seconds=None):
+        """seconds: how long the audio of its newest sentence plays; the
+        text then slides at the pace of her voice (None: no audio)."""
         self._cancel_dismiss()
         self._voice_turn = True
         self._reply_text = text
+        self._pace = seconds if seconds and seconds > 0 else None
+        self._slide_held = False
         self._set_state("speaking")
         self._update_layout()
 
@@ -778,6 +850,12 @@ class OverlayWindow:
             self._finish_turn()
         self._set_state("error")
         self._update_layout()
+
+    def set_voice_mode(self, enabled: bool):
+        """Keep the mode visible even between turns."""
+        if self._voice_mode != enabled:
+            self._voice_mode = enabled
+            self._redraw()
 
     def set_show_balloon(self, enabled):
         """The Settings checkbox controls the in-window text area."""

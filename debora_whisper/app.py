@@ -13,8 +13,8 @@ import customtkinter as ctk
 
 from debora_whisper.dictation_engine import (
     AppState, DictationApp, MODEL_REGISTRY,
-    load_config, save_config, validate_config, log, create_model,
-    is_model_downloaded, device_failure,
+    load_config, save_config, start_in_dictation, validate_config, log, create_model,
+    is_model_downloaded, device_failure, set_voice_chat_config,
     apply_device_priority, avoid_lost_npu, detect_devices, rotate_logs, log_folder_moves,
     select_device,
 )
@@ -44,8 +44,7 @@ class GUIApp:
         self._root.iconphoto(True, self._icon_photo)
 
         # Engine
-        self._engine = DictationApp(config)
-        self._engine.add_callback(self._on_state_change)
+        self._engine = self._new_engine()
 
         # Overlay
         self._overlay = OverlayWindow(
@@ -58,6 +57,7 @@ class GUIApp:
             on_width_changed=self._on_width_changed,
         )
         self._overlay.set_show_balloon(config.get("show_balloon", True))
+        self._overlay.set_voice_mode(bool(config.get("voice_chat")))
         self._overlay.set_balloon_font_size(config.get("balloon_font_size", 16))
 
         # Tray
@@ -117,6 +117,12 @@ class GUIApp:
                 self._root.destroy()
             except Exception:
                 pass  # already destroyed via _quit
+
+    def _new_engine(self) -> DictationApp:
+        engine = DictationApp(self._config)
+        engine.add_callback(self._on_state_change)
+        engine.on_voice_chat_toggle = self._toggle_voice_chat
+        return engine
 
     def _start_engine(self):
         """Start the engine in non-blocking mode."""
@@ -194,7 +200,7 @@ class GUIApp:
         elif state == AppState.SPEAKING:
             self._stop_audio_polling()
             self._tray.update_state(state_name, "Débora Whisper — Speaking...")
-            self._overlay.show_speaking(data.get("text", ""))
+            self._overlay.show_speaking(data.get("text", ""), data.get("seconds"))
 
         elif state == AppState.PROCESSING:
             self._stop_audio_polling()
@@ -376,16 +382,18 @@ class GUIApp:
     # -- Voice chat --------------------------------------------------------
 
     def _toggle_voice_chat(self):
-        """Tray item (on the tray's thread)."""
+        """Tray item or voice chat hotkey (not on the Tk thread)."""
         self._root.after(0, self._set_voice_chat, not self._config.get("voice_chat"))
 
     def _set_voice_chat(self, enabled: bool):
         """Switch voice chat on the running engine; no restart, no rebuild.
         The LLM loads in its own process, so even a hung load cannot freeze
         the app."""
-        self._config["voice_chat"] = enabled
+        set_voice_chat_config(self._config, enabled)
+        self._overlay.set_voice_mode(enabled)
+        self._tray.refresh()
         save_config(self._config)
-        self._engine.set_voice_chat(enabled)
+        self._engine.set_voice_chat(enabled, listen=True)
         if self._settings_win and self._settings_win.is_open:
             self._settings_win.set_voice_chat(enabled)
 
@@ -399,10 +407,15 @@ class GUIApp:
         self._root.after(0, self._settings_win.show)
 
     # Settings that only take effect in a newly built engine.
-    _REBUILD_KEYS = ("model_size", "device", "hotkey",
+    _REBUILD_KEYS = ("model_size", "device", "hotkey", "voice_chat_hotkey",
                      "beep_on_start", "sample_rate", "max_record_seconds")
 
     def _on_settings_apply(self, new_config: dict):
+        try:
+            validate_config(new_config)
+        except ValueError as e:
+            self._settings_status(str(e), "#FF453A")
+            return
         model_changed = new_config["model_size"] != self._config["model_size"]
         voice_chat = new_config.get("voice_chat", self._config.get("voice_chat"))
         voice_chat_changed = bool(voice_chat) != bool(self._config.get("voice_chat"))
@@ -437,13 +450,19 @@ class GUIApp:
         if harness_changed:
             self._engine.voice_chat.interrupt()
             log("Voice chat: backend settings changed; applied on the next turn.")
-        self._config.update(new_config)
+        self._config.update({key: value for key, value in new_config.items()
+                             if key != "_saved_voice_chat"})
+        if voice_chat_changed:
+            set_voice_chat_config(self._config, bool(voice_chat))
         save_config(self._config)
         if voice_chat_changed and not (rebuild and not failure):
             # A rebuilt engine starts voice chat itself; this one switches now.
             self._engine.set_voice_chat(bool(voice_chat))
 
         # Update balloon settings immediately (no engine restart needed)
+        self._overlay.set_voice_mode(bool(self._config.get("voice_chat")))
+        if voice_chat_changed:
+            self._tray.refresh()
         self._overlay.set_show_balloon(self._config.get("show_balloon", True))
         self._overlay.set_balloon_font_size(self._config.get("balloon_font_size", 16))
 
@@ -479,14 +498,12 @@ class GUIApp:
                 self._settings_status("Downloading model...", "#FF9F0A")
                 def _on_download_done():
                     self._settings_status("Loading model...", "#FF9F0A")
-                    self._engine = DictationApp(self._config)
-                    self._engine.add_callback(self._on_state_change)
+                    self._engine = self._new_engine()
                     self._engine.start_background()
                 onboarding = OnboardingWindow(self._root, self._config, on_done=_on_download_done)
                 onboarding.show()
             else:
-                self._engine = DictationApp(self._config)
-                self._engine.add_callback(self._on_state_change)
+                self._engine = self._new_engine()
                 self._engine.start_background()
         else:
             self._settings_status("Settings saved.", "#30D158")
@@ -575,6 +592,9 @@ def main():
                              "instead of typing")
     parser.add_argument("--voice-chat-backend", choices=["local", "claude"], help="Voice chat backend")
     parser.add_argument("--harness-cwd", help="Claude Code folder (default: home)")
+    parser.add_argument("--harness-new-session-on-start", action=argparse.BooleanOptionalAction,
+                        default=None, help="Start a fresh Claude session on each Débora run")
+    parser.add_argument("--harness-session-name", help="Claude session display name")
     shortcut = parser.add_mutually_exclusive_group()
     shortcut.add_argument("--install-shortcut", action="store_true",
                           help="Add Débora Whisper to the Start Menu, then exit")
@@ -615,10 +635,15 @@ def main():
         config["continuous_listening"] = True
     if args.voice_chat:
         config["voice_chat"] = True
+    warm_voice_chat = start_in_dictation(config, voice_chat_requested=args.voice_chat)
     if args.voice_chat_backend:
         config["voice_chat_backend"] = args.voice_chat_backend
     if args.harness_cwd is not None:
         config["harness_cwd"] = args.harness_cwd
+    if args.harness_new_session_on_start is not None:
+        config["harness_new_session_on_start"] = args.harness_new_session_on_start
+    if args.harness_session_name is not None:
+        config["harness_session_name"] = args.harness_session_name
 
     validate_config(config)
     rotate_logs()
@@ -627,6 +652,7 @@ def main():
     check_npu = avoid_lost_npu(config)
 
     app = GUIApp(config)
+    app._engine.warm_voice_chat = warm_voice_chat
     if check_npu:
         app._schedule_npu_recovery()
     app.run()

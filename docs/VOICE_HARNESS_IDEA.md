@@ -154,7 +154,11 @@ pessoal como `harness_cwd`, `~/.debora` já está dentro do diretório de trabal
 voz com Claude, usando o modo capturado ao iniciar a gravação ou escuta contínua.
 Ditado e Qwen local não recebem dicas. O cache acompanha o mtime do arquivo e mantém
 as entradas mais recentes primeiro, sem duplicatas por maiúsculas/minúsculas, até
-40 termos / 150 tokens estimados. OpenVINO aceita uma string em `hotwords`, com
+40 termos / 150 tokens estimados. Nomes do projeto em `harness_cwd` (pasta,
+`[project].name` do `pyproject.toml` e `name` do `package.json`, sem escopo) preenchem
+o orçamento restante, incluindo uma forma com espaços no lugar de hífens/underscores;
+a pasta pessoal é ignorada. O cache usa a pasta e os mtimes dos dois manifestos.
+OpenVINO aceita uma string em `hotwords`, com
 fallback para `initial_prompt`; faster-whisper só recebe `hotwords` se a assinatura
 suportar. Parakeet ignora as dicas e avisa uma vez. Mudanças registram apenas a
 quantidade de termos; `harness_hotwords: false` desativa o recurso.

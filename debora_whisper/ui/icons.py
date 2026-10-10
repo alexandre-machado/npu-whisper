@@ -9,8 +9,10 @@ ICON_SIZE = 64
 # Cores da nova identidade visual
 C_ERROR = "#EF4444"            # Vermelho (mantido para clareza de erro)
 C_READY = "#9CA3AF"            # Cinza (Pronto, aguardando hotkey)
-C_RECORDING_IDLE = "#7E22CE"   # Roxo Escuro (Escutando em silêncio)
-C_RECORDING_ACTIVE = "#A855F7" # Roxo Vibrante (Captando voz ativamente)
+C_RECORDING_IDLE = "#047857"   # Verde Escuro (Escutando em silêncio)
+C_RECORDING_ACTIVE = "#10B981" # Verde Vibrante (Captando voz ativamente)
+C_VOICE_CHAT_IDLE = "#7E22CE"
+C_VOICE_CHAT_ACTIVE = "#A855F7"
 C_PROCESSING = "#06B6D4"       # Ciano Brilhante (Transcrevendo/Holograma)
 C_LOADING = "#FBBF24"          # Dourado (Carregando modelo)
 C_SPEAKING = "#0EA5E9"         # Azul/Ciano Vivo (Assistente falando)
@@ -139,31 +141,36 @@ for i in range(12):
 # Matriz de volume dinâmico (pré-gerada para poupar CPU)
 # 11 níveis de volume (0.0 a 1.0)
 _VOLUME_MATRIX = []
+_VOICE_CHAT_VOLUME_MATRIX = []
 for vol_idx in range(11):
     vol = vol_idx / 10.0
     frames = []
+    voice_frames = []
     # Cria 4 variações de barras para cada nível de volume (para dar variação natural)
     for _ in range(4):
         # Base mais suave e picos seguindo o volume
         h = [max(0.15, rng.uniform(vol * 0.3, vol)) for _ in range(5)]
         frames.append(render_bars(C_RECORDING_ACTIVE, h))
+        voice_frames.append(render_bars(C_VOICE_CHAT_ACTIVE, h))
     _VOLUME_MATRIX.append(frames)
+    _VOICE_CHAT_VOLUME_MATRIX.append(voice_frames)
 
 # Ícones estáticos
 _ICON_ERROR = render_bars(C_ERROR, [0.2, 0.2, 0.2, 0.2, 0.2])
 _ICON_READY = render_bars(C_READY, [0.3, 0.5, 0.8, 0.5, 0.3])
 _ICON_RECORDING_IDLE = render_bars(C_RECORDING_IDLE, [0.15, 0.2, 0.15, 0.2, 0.15])
+_ICON_VOICE_CHAT_IDLE = render_bars(C_VOICE_CHAT_IDLE, [0.15, 0.2, 0.15, 0.2, 0.15])
 
 _vol_frame_counter = 0
 
-def get_volume_icon(level: float) -> Image.Image:
+def get_volume_icon(level: float, voice_chat: bool = False) -> Image.Image:
     """Retorna um ícone de gravação baseado no nível de áudio atual."""
     global _vol_frame_counter
     _vol_frame_counter += 1
     
     if level < 0.03:
-        # Se estiver muito baixo, exibe estado ocioso (roxo escuro, baixo)
-        return _ICON_RECORDING_IDLE
+        # Se estiver muito baixo, exibe estado ocioso (escuro, baixo)
+        return _ICON_VOICE_CHAT_IDLE if voice_chat else _ICON_RECORDING_IDLE
         
     # Clampa o nível de volume
     level = max(0.0, min(1.0, level))
@@ -172,9 +179,10 @@ def get_volume_icon(level: float) -> Image.Image:
     boosted_level = min(1.0, level * 1.5 + 0.2)
     idx = int(boosted_level * 10)
     
-    return _VOLUME_MATRIX[idx][_vol_frame_counter % 4]
+    matrix = _VOICE_CHAT_VOLUME_MATRIX if voice_chat else _VOLUME_MATRIX
+    return matrix[idx][_vol_frame_counter % 4]
 
-def get_icon(state: str, frame: int = 0) -> Image.Image:
+def get_icon(state: str, frame: int = 0, voice_chat: bool = False) -> Image.Image:
     """Retorna o frame correspondente ao estado atual."""
     if state == "loading":
         return _LOADING_FRAMES[frame % len(_LOADING_FRAMES)]
@@ -183,7 +191,7 @@ def get_icon(state: str, frame: int = 0) -> Image.Image:
     elif state == "speaking":
         return _SPEAKING_FRAMES[frame % len(_SPEAKING_FRAMES)]
     elif state == "recording":
-        return _ICON_RECORDING_IDLE
+        return _ICON_VOICE_CHAT_IDLE if voice_chat else _ICON_RECORDING_IDLE
     elif state == "error":
         return _ICON_ERROR
     # default to ready

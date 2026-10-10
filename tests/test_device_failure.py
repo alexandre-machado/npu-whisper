@@ -824,6 +824,7 @@ def test_startup_after_an_npu_loss_probes_it_in_the_background(monkeypatch):
     class FakeGUI:
         def __init__(self, config):
             self.config, self.scheduled = config, 0
+            self._engine = types.SimpleNamespace()
             created.append(self)
 
         def _schedule_npu_recovery(self):

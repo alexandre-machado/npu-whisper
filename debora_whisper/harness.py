@@ -12,6 +12,11 @@ import time
 import uuid
 from pathlib import Path
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10
+    import tomli as tomllib
+
 from debora_whisper import paths
 from debora_whisper.processes import NO_WINDOW, kill_tree
 
@@ -19,6 +24,7 @@ HARNESS_PROMPT = Path(__file__).with_name("harness_prompt.md")
 PERMISSION_MODES = ("acceptEdits", "auto", "bypassPermissions", "manual", "dontAsk", "plan")
 MEMORY_MAX_LINES = 100
 MEMORY_MAX_BYTES = 8192
+PROJECT_MANIFEST_MAX_BYTES = 256 * 1024
 # Exact forms deliberately avoid writable flags (git branch -D, --output,
 # nvidia-smi -pl) and indefinite reads (Get-Content -Wait).
 DEFAULT_ALLOWED_TOOLS = tuple(
@@ -45,11 +51,22 @@ def harness_allowed_tools(config: dict) -> tuple[str, ...]:
     return DEFAULT_ALLOWED_TOOLS if rules is None else tuple(rules)
 
 
+def validate_session_name(name):
+    """Keep display names safe even when Windows resolves Claude to a batch file."""
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("harness_session_name must be a non-empty string")
+    if len(name) > 80 or any(not (c.isalpha() or c.isdecimal() or c in " ._-·:()")
+                             for c in name):
+        raise ValueError("harness_session_name must be at most 80 characters and contain only "
+                         "letters, digits, spaces and . _ - · : ( )")
+
+
 def harness_command(config: dict, session_id: str, resume: bool) -> list[str]:
     """Build argv; executable lookup and the dated prompt happen at launch."""
     command = ["claude", "-p", "--input-format", "stream-json",
                "--output-format", "stream-json", "--verbose", "--include-partial-messages",
                "--resume" if resume else "--session-id", session_id,
+               "--name", config.get("harness_session_name", "Débora Whisper"),
                "--permission-mode", config.get("harness_permission_mode", "acceptEdits"),
                "--permission-prompts", "host", "--permission-prompt-tool", "stdio",
                "--add-dir", str(harness_memory_file(config).parent),
@@ -83,7 +100,9 @@ def harness_key(config: dict) -> tuple:
             config.get("harness_permission_mode", "acceptEdits"),
             config.get("harness_prompt_file"), config.get("language"),
             config.get("harness_permission_response", "deny"),
-            os.path.normcase(str(harness_memory_file(config))), harness_allowed_tools(config))
+            os.path.normcase(str(harness_memory_file(config))), harness_allowed_tools(config),
+            config.get("harness_new_session_on_start", False),
+            config.get("harness_session_name", "Débora Whisper"))
 
 
 def voice_prompt(prompt: str, language: str | None, now: str) -> str:
@@ -115,6 +134,92 @@ def memory_terms(text: str) -> list[str]:
     return terms
 
 
+def bounded_hotwords(terms) -> tuple[str, ...]:
+    kept, seen, tokens = [], set(), 0
+    for term in terms:
+        folded = term.casefold()
+        if folded in seen:
+            continue
+        seen.add(folded)
+        # UTF-8 bytes / 3 plus a separator leaves room below Whisper's
+        # ~224-token budget, without loading a tokenizer.
+        try:
+            cost = (len(term.encode("utf-8")) + 2) // 3 + 1
+        except UnicodeError:
+            continue
+        if tokens + cost > 150:
+            continue
+        kept.append(term)
+        tokens += cost
+        if len(kept) == 40:
+            break
+    return tuple(kept)
+
+
+class ProjectHotwords:
+    """Cache names from the harness folder and its two package manifests."""
+
+    def __init__(self):
+        self._key = None
+        self._terms = ()
+
+    def terms(self, config: dict, log=print) -> tuple[str, ...]:
+        try:
+            folder = harness_cwd(config)
+            if folder == Path.home().resolve():
+                return ()
+        except (OSError, ValueError, RuntimeError):
+            return ()
+        files = (folder / "pyproject.toml", folder / "package.json")
+        mtimes = []
+        for path in files:
+            try:
+                mtimes.append(path.stat().st_mtime_ns
+                              if not path.is_symlink() and path.is_file() else None)
+            except OSError:
+                mtimes.append(None)
+        key = (folder, *mtimes)
+        if key == self._key:
+            return self._terms
+        self._key, self._terms = key, ()
+        names, failed = [], False
+        if len(folder.name) <= 64 and re.fullmatch(r"[\w .-]+", folder.name):
+            names.append(folder.name)
+        for path, mtime in zip(files, mtimes):
+            if mtime is None:
+                continue
+            try:
+                with path.open("rb") as manifest:
+                    content = manifest.read(PROJECT_MANIFEST_MAX_BYTES + 1)
+                if len(content) > PROJECT_MANIFEST_MAX_BYTES:
+                    failed = True
+                    continue
+                text = content.decode("utf-8")
+                if path.name == "pyproject.toml":
+                    data = tomllib.loads(text).get("project", {})
+                else:
+                    data = json.loads(text)
+                name = data.get("name") if isinstance(data, dict) else None
+                if isinstance(name, str):
+                    if path.name == "package.json" and name.startswith("@"):
+                        name = name.partition("/")[2]
+                    if re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9._-]{0,62}[A-Za-z0-9])?", name):
+                        names.append(name)
+            except (OSError, ValueError, RecursionError):
+                failed = True
+        if failed:
+            log("Voice chat: cannot read project hotword metadata; skipping invalid files")
+        terms = []
+        for name in names:
+            if name:
+                terms.append(name)
+                spoken = re.sub(r"[-_]+", " ", name).strip()
+                if spoken and spoken != name:
+                    terms.append(spoken)
+        self._terms = tuple(terms)
+        return self._terms
+
+
 class MemoryHotwords:
     """Cache a small, newest-first recognition vocabulary by file mtime."""
 
@@ -140,22 +245,7 @@ class MemoryHotwords:
             log(f"Voice chat: cannot read hotword memory ({type(e).__name__})")
             return self._terms
         # Reverse lines before extraction so repeated terms retain their latest entry.
-        terms, seen, tokens = [], set(), 0
-        for term in memory_terms("\n".join(reversed(text.splitlines()))):
-            folded = term.casefold()
-            if folded in seen:
-                continue
-            seen.add(folded)
-            # UTF-8 bytes / 3 plus a separator is a cheap, conservative estimate
-            # for project names; leave room below Whisper's ~224-token budget.
-            cost = (len(term.encode("utf-8")) + 2) // 3 + 1
-            if tokens + cost > 150:
-                continue
-            terms.append(term)
-            tokens += cost
-            if len(terms) == 40:
-                break
-        self._terms = tuple(terms)
+        self._terms = bounded_hotwords(memory_terms("\n".join(reversed(text.splitlines()))))
         return self._terms
 
 
@@ -201,10 +291,15 @@ def _sessions(path: Path, log) -> dict:
 
 
 _sessions_lock = threading.Lock()
+# Survives harness restarts, but never a restart of Débora. Include the store
+# path so independent session stores do not share conversations.
+# Store selection separately from confirmation that Claude saved a conversation.
+_run_sessions: dict[tuple[Path, str], tuple[str | None, bool]] = {}
 
 
 def _save_session(path: Path, cwd: str, session_id: str | None, log):
     with _sessions_lock:
+        _run_sessions[(path.resolve(), cwd)] = (session_id, session_id is not None)
         data = _sessions(path, log)
         if session_id is None:
             data.pop(cwd, None)
@@ -228,6 +323,7 @@ class HarnessSession:
     def __init__(self, config: dict, log=print, command_factory=harness_command,
                  process_factory=subprocess.Popen, session_file=None, on_event=None,
                  permission_handler=None):
+        validate_session_name(config.get("harness_session_name", "Débora Whisper"))
         self.config, self.log = dict(config), log
         self.key = harness_key(config)
         self.cwd = harness_cwd(config)
@@ -236,16 +332,25 @@ class HarnessSession:
             raise ValueError(f"Harness folder does not exist: {self.cwd}")
         self.on_event, self.permission_handler = on_event, permission_handler
         self.session_file = Path(session_file) if session_file else paths.CONFIG_DIR / "harness_session.json"
-        saved = _sessions(self.session_file, log).get(self.key[0])
+        run_key = (self.session_file.resolve(), self.key[0])
+        with _sessions_lock:
+            if run_key in _run_sessions:
+                saved, resumable = _run_sessions[run_key]
+            elif config.get("harness_new_session_on_start", False):
+                saved, resumable = None, False
+            else:
+                saved = _sessions(self.session_file, log).get(self.key[0])
+                resumable = bool(saved)
         try:
             saved = str(uuid.UUID(saved)) if saved else None
         except (TypeError, ValueError):
             log(f"Voice chat: ignoring an invalid saved Claude session {saved!r}")
             saved = None
+        resumable = bool(saved) and resumable
         self.session_id = saved or str(uuid.uuid4())
         # A resumed session that never completes a turn (expired, deleted)
         # is forgotten, so the next start is a new conversation.
-        self._resumed, self._confirmed = bool(saved), False
+        self._resumed, self._confirmed = resumable, False
         self.error: str | None = None
         self._events: queue.Queue = queue.Queue()
         self._send_lock = threading.Lock()
@@ -264,7 +369,7 @@ class HarnessSession:
                 self._prompt_file = Path(file.name)
                 file.write(prompt)
             command = command_factory({**config, "harness_prompt_file": str(self._prompt_file)},
-                                      self.session_id, bool(saved))
+                                      self.session_id, resumable)
             command[0] = shutil.which(command[0]) or command[0]
             self.process = process_factory(
                 command, cwd=str(self.cwd), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -273,10 +378,12 @@ class HarnessSession:
         except Exception:
             self._remove_prompt()
             raise
+        with _sessions_lock:
+            _run_sessions[run_key] = (self.session_id, resumable)
         threading.Thread(target=self._read, daemon=True).start()
         threading.Thread(target=self._read_stderr, daemon=True).start()
         log(f"Voice chat: Claude session {self.session_id} in {self.cwd} "
-            f"({'resume' if saved else 'new'}, pid {self.process.pid})")
+            f"({'resume' if resumable else 'new'}, pid {self.process.pid})")
 
     @property
     def running(self) -> bool:

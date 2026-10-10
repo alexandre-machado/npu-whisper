@@ -92,7 +92,7 @@ class TrayManager:
 
     def start(self):
         """Start the tray icon in a daemon thread."""
-        initial_icon = get_icon(self._state)
+        initial_icon = get_icon(self._state, voice_chat=self._voice_chat_on())
         self._icon = pystray.Icon(
             name="debora-whisper",
             icon=initial_icon,
@@ -132,18 +132,20 @@ class TrayManager:
         whose result changed are made: a silent mic or a repeated state costs
         nothing."""
         shown_image = shown_title = shown_state = None
+        shown_voice_chat = None
         while self._running:
             self._wake.clear()
             state, title = self._state, self._tooltip
+            voice_chat = self._voice_chat_on()
             if state == "recording":
-                image = get_volume_icon(self._level)
+                image = get_volume_icon(self._level, voice_chat=voice_chat)
                 interval = 0.1
             elif state in ("loading", "processing", "speaking"):
                 self._anim_frame += 1
-                image = get_icon(state, self._anim_frame)
+                image = get_icon(state, self._anim_frame, voice_chat=voice_chat)
                 interval = 0.15
             else:
-                image = get_icon(state)
+                image = get_icon(state, voice_chat=voice_chat)
                 interval = None  # static: sleep until the next update
 
             icon = self._icon
@@ -155,17 +157,22 @@ class TrayManager:
                     if title != shown_title:
                         icon.title = title
                         shown_title = title
-                    if state != shown_state:
+                    if state != shown_state or voice_chat != shown_voice_chat:
                         # Rebuild so the dynamic menu text follows the state.
                         icon.menu = self._build_menu()
                         icon.update_menu()
                         shown_state = state
+                        shown_voice_chat = voice_chat
                 except Exception:
                     pass  # icon torn down underneath us during shutdown
             else:
                 interval = 0.1  # not shown yet: retry shortly
 
             self._wake.wait(interval)
+
+    def refresh(self):
+        """Wake the renderer after a mode change."""
+        self._wake.set()
 
     def update_state(self, state_name: str, tooltip: str | None = None):
         """Record a new state/tooltip; the render thread applies it."""
