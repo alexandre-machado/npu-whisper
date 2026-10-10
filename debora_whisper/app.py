@@ -411,6 +411,11 @@ class GUIApp:
                      "beep_on_start", "sample_rate", "max_record_seconds")
 
     def _on_settings_apply(self, new_config: dict):
+        try:
+            validate_config(new_config)
+        except ValueError as e:
+            self._settings_status(str(e), "#FF453A")
+            return
         model_changed = new_config["model_size"] != self._config["model_size"]
         voice_chat = new_config.get("voice_chat", self._config.get("voice_chat"))
         voice_chat_changed = bool(voice_chat) != bool(self._config.get("voice_chat"))

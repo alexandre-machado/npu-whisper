@@ -1143,6 +1143,47 @@ def test_settings_switch_voice_chat_without_a_new_engine():
     factory.assert_not_called()
 
 
+@pytest.mark.parametrize("name", ["", "   ", "\t\r\n", "Debora & whoami", "Debora\n", "x" * 81])
+def test_settings_apply_rejects_invalid_session_name(name, monkeypatch):
+    from debora_whisper.ui.settings import SettingsWindow
+
+    window = SettingsWindow.__new__(SettingsWindow)
+    original = dict(DEFAULT_CONFIG)
+    window._config = original.copy()
+    for attr, value in {
+        "_model_radio_var": original["model_size"], "_hotkey_var": original["hotkey"],
+        "_beep_var": True, "_enter_var": False, "_inline_drafts_var": False,
+        "_voice_chat_var": True, "_backend_var": "Claude Code",
+        "_harness_new_session_var": True, "_harness_session_name_var": name,
+        "_voice_var": "test", "_balloon_var": True, "_font_size_var": "16",
+    }.items():
+        setattr(window, attr, MagicMock(get=MagicMock(return_value=value)))
+    window._harness_cwd = None
+    window._get_selected_lang_code = lambda: "pt"
+    window._status_label, window._win = MagicMock(), MagicMock()
+    window._on_apply = MagicMock()
+    monkeypatch.setattr(de, "detect_devices", lambda: ["CPU"])
+    monkeypatch.setattr(de, "select_device", lambda *args: "CPU")
+
+    window._apply()
+
+    assert window._config == original
+    window._on_apply.assert_not_called()
+    assert "harness_session_name" in window._status_label.configure.call_args.kwargs["text"]
+
+
+@pytest.mark.parametrize("name", ["", "   ", "Debora | whoami"])
+def test_settings_callback_rejects_invalid_name_before_save(name):
+    gui = _gui()
+    original = gui._config.copy()
+    with patch.dict(gui._on_settings_apply.__globals__, {"save_config": MagicMock()}) as g:
+        gui._on_settings_apply({**original, "harness_session_name": name})
+        g["save_config"].assert_not_called()
+    assert gui._config == original
+    gui._engine.stop_if_idle.assert_not_called()
+    assert "harness_session_name" in gui._settings_status.call_args.args[0]
+
+
 def test_rebuilt_engine_starts_voice_chat_itself():
     gui = _gui()
     old = gui._engine
@@ -1504,7 +1545,7 @@ def test_claude_restarts_keep_this_runs_session_before_and_after_result(claude_r
     assert second is not first
     assert second.session_id == first.session_id
     command = processes.call_args.args[0]
-    assert command[command.index("--resume") + 1] == first.session_id
+    assert command[command.index("--session-id") + 1] == first.session_id
     assert command[command.index("--name") + 1] == "Debora test"
     assert first._prompt_file is None
     second._events.put({"type": "result", "session_id": second.session_id})
@@ -1513,6 +1554,7 @@ def test_claude_restarts_keep_this_runs_session_before_and_after_result(claude_r
     assert stored[second.key[0]] == second.session_id
     harness.stop_harness()
     assert harness.start_harness(changed).session_id == second.session_id
+    assert "--resume" in processes.call_args.args[0]
     # A new Débora process has no run memory, even though disk has a UUID.
     harness.stop_harness()
     harness._run_sessions.clear()
@@ -1544,7 +1586,52 @@ def test_claude_enabling_fresh_starts_preserves_an_active_session(claude_runtime
     first = harness.start_harness(config)
     second = harness.start_harness({**config, "harness_new_session_on_start": True})
     assert second.session_id == first.session_id
-    assert "--resume" in processes.call_args.args[0]
+    assert "--session-id" in processes.call_args.args[0]
+
+
+@pytest.mark.parametrize("completed", [False, True])
+def test_claude_disabling_fresh_starts_preserves_this_runs_session(claude_runtime, completed):
+    import uuid
+    harness, config, processes = claude_runtime
+    saved = str(uuid.uuid4())
+    store = harness.paths.CONFIG_DIR / "harness_session.json"
+    store.write_text(json.dumps({harness.harness_key(config)[0]: saved}), encoding="utf-8")
+    first = harness.start_harness({**config, "harness_new_session_on_start": True})
+    assert first.session_id != saved
+    if completed:
+        first._events.put({"type": "result"})
+        first.send("oi", MagicMock(), threading.Event())
+    second = harness.start_harness(config)
+    assert second.session_id == first.session_id
+    assert ("--resume" in processes.call_args.args[0]) is completed
+    assert json.loads(store.read_text(encoding="utf-8"))[first.key[0]] == (
+        first.session_id if completed else saved)
+
+
+@pytest.mark.parametrize("fresh", [False, True])
+def test_claude_exit_before_initialization_retries_selected_uuid_without_resume(claude_runtime, fresh):
+    harness, config, processes = claude_runtime
+    config["harness_new_session_on_start"] = fresh
+    first = harness.start_harness(config)
+    first.process.poll = lambda: 1  # Popen succeeded, but initialization failed.
+    second = harness.start_harness(config)
+    assert second.session_id == first.session_id
+    command = processes.call_args.args[0]
+    assert "--resume" not in command
+    assert command[command.index("--session-id") + 1] == first.session_id
+    second._events.put({"type": "result"})
+    second.send("retry this voice turn", MagicMock(), threading.Event())
+    assert second._confirmed
+
+
+@pytest.mark.parametrize("launcher", ["claude.cmd", "claude.bat"])
+@pytest.mark.parametrize("char", list('&|<>^%"\r\n'))
+def test_claude_batch_launcher_rejects_unsafe_session_name(claude_runtime, monkeypatch, launcher, char):
+    harness, config, processes = claude_runtime
+    monkeypatch.setattr(harness.shutil, "which", lambda executable: launcher)
+    with pytest.raises(ValueError, match="harness_session_name"):
+        harness.start_harness({**config, "harness_session_name": f"Debora{char}test"})
+    processes.assert_not_called()
 
 
 def test_claude_failed_launch_does_not_reserve_a_run_session(claude_runtime):
@@ -1564,6 +1651,8 @@ def test_claude_unavailable_run_session_is_forgotten(claude_runtime):
     harness, config, processes = claude_runtime
     config["harness_new_session_on_start"] = True
     first = harness.start_harness(config)
+    first._events.put({"type": "result"})
+    first.send("oi", MagicMock(), threading.Event())
     harness.stop_harness()
     second = harness.start_harness(config)
     second.error = "Session not found"

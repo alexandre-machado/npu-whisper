@@ -383,9 +383,8 @@ def validate_config(config: dict):
         raise ValueError("harness_hotwords must be a bool")
     if not isinstance(config.get("harness_new_session_on_start", False), bool):
         raise ValueError("harness_new_session_on_start must be a bool")
-    name = config.get("harness_session_name", "Débora Whisper")
-    if not isinstance(name, str) or not name.strip():
-        raise ValueError("harness_session_name must be a non-empty string")
+    from debora_whisper.harness import validate_session_name
+    validate_session_name(config.get("harness_session_name", "Débora Whisper"))
     for key in ("harness_cwd", "harness_model", "harness_prompt_file", "harness_memory_file"):
         value = config.get(key)
         if value is not None and (not isinstance(value, str) or not value.strip()):

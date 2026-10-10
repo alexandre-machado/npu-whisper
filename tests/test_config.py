@@ -8,6 +8,17 @@ from debora_whisper.dictation_engine import validate_config, DEFAULT_CONFIG
 
 
 class TestConfigValidation:
+    @pytest.mark.parametrize("name", ["", "   ", None, 42, "a" * 81,
+                                     *[f"Debora{c}test" for c in '&|<>^%"\r\n\t!'],
+                                     "Debora\n", "\nDebora"])
+    def test_invalid_harness_session_name(self, name):
+        with pytest.raises(ValueError, match="harness_session_name"):
+            validate_config({**DEFAULT_CONFIG, "harness_session_name": name})
+
+    @pytest.mark.parametrize("name", ["Débora Whisper", "Projeto 123 ._-·:()", "a" * 80])
+    def test_valid_harness_session_name(self, name):
+        validate_config({**DEFAULT_CONFIG, "harness_session_name": name})
+
     def test_valid_config_passes(self):
         config = DEFAULT_CONFIG.copy()
         validate_config(config)  # should not raise

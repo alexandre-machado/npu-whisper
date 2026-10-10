@@ -521,7 +521,7 @@ class SettingsWindow:
         new_config["voice_chat_backend"] = "claude" if self._backend_var.get() == "Claude Code" else "local"
         new_config["harness_cwd"] = self._harness_cwd
         new_config["harness_new_session_on_start"] = self._harness_new_session_var.get()
-        new_config["harness_session_name"] = self._harness_session_name_var.get().strip()
+        new_config["harness_session_name"] = self._harness_session_name_var.get()
         voice = self._voice_var.get()
         new_config["tts_voice"] = None if voice == _DEFAULT_VOICE else voice
         new_config["show_balloon"] = self._balloon_var.get()
@@ -536,6 +536,12 @@ class SettingsWindow:
     def _apply(self):
         """Apply settings without closing the window."""
         new_config = self._get_new_config()
+        from debora_whisper.dictation_engine import validate_config
+        try:
+            validate_config(new_config)
+        except ValueError as e:
+            self.update_status(str(e), "#FF453A")
+            return
         self._config = dict(new_config)
         if self._on_apply:
             self._on_apply(new_config)
