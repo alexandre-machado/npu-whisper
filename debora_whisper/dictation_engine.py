@@ -80,6 +80,8 @@ DEFAULT_CONFIG = {
     "voice_chat_backend": "local",  # local (Qwen/OpenVINO) or claude
     "harness_cwd": None,           # null: the user's home directory
     "harness_model": None,         # null: Claude Code's default
+    "harness_new_session_on_start": False,  # Fresh per folder on each Débora run
+    "harness_session_name": "Débora Whisper",  # Claude's display name, including resumes
     "harness_permission_mode": "acceptEdits",
     "harness_permission_response": "deny",  # requests not already allowed by Claude
     "harness_allowed_tools": None,  # null uses the packaged read-only diagnostics
@@ -379,6 +381,11 @@ def validate_config(config: dict):
         raise ValueError('voice_chat_hotkey must be a single key or "" to disable')
     if not isinstance(config.get("harness_hotwords", True), bool):
         raise ValueError("harness_hotwords must be a bool")
+    if not isinstance(config.get("harness_new_session_on_start", False), bool):
+        raise ValueError("harness_new_session_on_start must be a bool")
+    name = config.get("harness_session_name", "Débora Whisper")
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("harness_session_name must be a non-empty string")
     for key in ("harness_cwd", "harness_model", "harness_prompt_file", "harness_memory_file"):
         value = config.get(key)
         if value is not None and (not isinstance(value, str) or not value.strip()):
@@ -3913,6 +3920,9 @@ def main():
                              "instead of typing")
     parser.add_argument("--voice-chat-backend", choices=["local", "claude"], help="Voice chat backend")
     parser.add_argument("--harness-cwd", help="Claude Code folder (default: home)")
+    parser.add_argument("--harness-new-session-on-start", action=argparse.BooleanOptionalAction,
+                        default=None, help="Start a fresh Claude session on each Débora run")
+    parser.add_argument("--harness-session-name", help="Claude session display name")
     args = parser.parse_args()
     log_folder_moves()
 
@@ -3942,6 +3952,10 @@ def main():
         config["voice_chat_backend"] = args.voice_chat_backend
     if args.harness_cwd is not None:
         config["harness_cwd"] = args.harness_cwd
+    if args.harness_new_session_on_start is not None:
+        config["harness_new_session_on_start"] = args.harness_new_session_on_start
+    if args.harness_session_name is not None:
+        config["harness_session_name"] = args.harness_session_name
 
     validate_config(config)
     rotate_logs()

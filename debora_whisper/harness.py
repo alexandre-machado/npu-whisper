@@ -50,6 +50,7 @@ def harness_command(config: dict, session_id: str, resume: bool) -> list[str]:
     command = ["claude", "-p", "--input-format", "stream-json",
                "--output-format", "stream-json", "--verbose", "--include-partial-messages",
                "--resume" if resume else "--session-id", session_id,
+               "--name", config.get("harness_session_name", "Débora Whisper"),
                "--permission-mode", config.get("harness_permission_mode", "acceptEdits"),
                "--permission-prompts", "host", "--permission-prompt-tool", "stdio",
                "--add-dir", str(harness_memory_file(config).parent),
@@ -83,7 +84,9 @@ def harness_key(config: dict) -> tuple:
             config.get("harness_permission_mode", "acceptEdits"),
             config.get("harness_prompt_file"), config.get("language"),
             config.get("harness_permission_response", "deny"),
-            os.path.normcase(str(harness_memory_file(config))), harness_allowed_tools(config))
+            os.path.normcase(str(harness_memory_file(config))), harness_allowed_tools(config),
+            config.get("harness_new_session_on_start", False),
+            config.get("harness_session_name", "Débora Whisper"))
 
 
 def voice_prompt(prompt: str, language: str | None, now: str) -> str:
@@ -201,10 +204,14 @@ def _sessions(path: Path, log) -> dict:
 
 
 _sessions_lock = threading.Lock()
+# Survives harness restarts, but never a restart of Débora. Include the store
+# path so independent session stores do not share conversations.
+_run_sessions: dict[tuple[Path, str], str | None] = {}
 
 
 def _save_session(path: Path, cwd: str, session_id: str | None, log):
     with _sessions_lock:
+        _run_sessions[(path.resolve(), cwd)] = session_id
         data = _sessions(path, log)
         if session_id is None:
             data.pop(cwd, None)
@@ -236,7 +243,12 @@ class HarnessSession:
             raise ValueError(f"Harness folder does not exist: {self.cwd}")
         self.on_event, self.permission_handler = on_event, permission_handler
         self.session_file = Path(session_file) if session_file else paths.CONFIG_DIR / "harness_session.json"
-        saved = _sessions(self.session_file, log).get(self.key[0])
+        run_key = (self.session_file.resolve(), self.key[0])
+        with _sessions_lock:
+            if config.get("harness_new_session_on_start", False):
+                saved = _run_sessions.get(run_key)
+            else:
+                saved = _sessions(self.session_file, log).get(self.key[0])
         try:
             saved = str(uuid.UUID(saved)) if saved else None
         except (TypeError, ValueError):
@@ -273,6 +285,8 @@ class HarnessSession:
         except Exception:
             self._remove_prompt()
             raise
+        with _sessions_lock:
+            _run_sessions[run_key] = self.session_id
         threading.Thread(target=self._read, daemon=True).start()
         threading.Thread(target=self._read_stderr, daemon=True).start()
         log(f"Voice chat: Claude session {self.session_id} in {self.cwd} "

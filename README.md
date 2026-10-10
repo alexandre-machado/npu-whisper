@@ -226,6 +226,8 @@ the default (`"voice_chat_backend": "local"`); speech recognition and TTS stay l
   "voice_chat_backend": "claude",
   "harness_cwd": null,
   "harness_model": null,
+  "harness_new_session_on_start": false,
+  "harness_session_name": "Débora Whisper",
   "harness_permission_mode": "acceptEdits",
   "harness_permission_response": "deny",
   "harness_allowed_tools": null,
@@ -292,10 +294,28 @@ Tools and decisions appear in `~/.debora/logs/app.log`. Replies stream into the
 existing TTS; fenced code and list markers are removed. After 1.5 seconds without
 text, Débora queues “Um instante.” once. Actual playback depends on TTS readiness.
 
+| Session setting | Default | Behavior |
+|---|---|---|
+| `harness_new_session_on_start` | `false` | Resume the saved conversation. If `true`, start fresh on the first use of each folder in each Débora process run; later harness restarts resume that run's session. |
+| `harness_session_name` | `"Débora Whisper"` | Literal display name passed through Claude's `--name`, on new sessions and resumes. Use `"Debora Whisper"` for an ASCII-only title. |
+
+Both settings are next to **Harness folder** in Settings. `debora` and
+`debora-cli` also accept `--harness-new-session-on-start`,
+`--no-harness-new-session-on-start`, and `--harness-session-name "My title"`.
+The name stays stable across harness restarts; it is not a date format.
+Claude Code 2.1.296 exposes `--name` (`-n`) in `claude --help`.
+
 Session IDs are saved by folder in `~/.debora/harness_session.json` and logged.
 After stopping Débora, open that folder in a terminal and run
-`claude --resume <session-id>` to continue. Restarting Débora resumes the same
-conversation; say “nova conversa” or “new conversation” to start a new one.
+`claude --resume <session-id>` to continue. By default, restarting Débora resumes
+the same conversation. With `harness_new_session_on_start: true`, a fresh UUID
+is selected at the first harness start for that folder, and retained in memory
+even before the first turn finishes. Changing settings or stopping/restarting
+the harness in the same app run keeps that UUID. Enabling the option after a
+folder's session has started keeps that session until the next app run.
+Say “nova conversa” or “new conversation” to discard both the saved and in-memory
+session and start a new one. An unavailable resumed session is still forgotten
+so the next attempt can start fresh.
 Backend/folder changes take effect on the next turn. This backend has no local
 eight-turn history limit or idle reset. See the
 [protocol findings](docs/benchmarks/harness-2026-10-09/README.md).
