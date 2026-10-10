@@ -44,8 +44,7 @@ class GUIApp:
         self._root.iconphoto(True, self._icon_photo)
 
         # Engine
-        self._engine = DictationApp(config)
-        self._engine.add_callback(self._on_state_change)
+        self._engine = self._new_engine()
 
         # Overlay
         self._overlay = OverlayWindow(
@@ -117,6 +116,12 @@ class GUIApp:
                 self._root.destroy()
             except Exception:
                 pass  # already destroyed via _quit
+
+    def _new_engine(self) -> DictationApp:
+        engine = DictationApp(self._config)
+        engine.add_callback(self._on_state_change)
+        engine.on_voice_chat_toggle = self._toggle_voice_chat
+        return engine
 
     def _start_engine(self):
         """Start the engine in non-blocking mode."""
@@ -376,7 +381,7 @@ class GUIApp:
     # -- Voice chat --------------------------------------------------------
 
     def _toggle_voice_chat(self):
-        """Tray item (on the tray's thread)."""
+        """Tray item or voice chat hotkey (not on the Tk thread)."""
         self._root.after(0, self._set_voice_chat, not self._config.get("voice_chat"))
 
     def _set_voice_chat(self, enabled: bool):
@@ -399,7 +404,7 @@ class GUIApp:
         self._root.after(0, self._settings_win.show)
 
     # Settings that only take effect in a newly built engine.
-    _REBUILD_KEYS = ("model_size", "device", "hotkey",
+    _REBUILD_KEYS = ("model_size", "device", "hotkey", "voice_chat_hotkey",
                      "beep_on_start", "sample_rate", "max_record_seconds")
 
     def _on_settings_apply(self, new_config: dict):
@@ -479,14 +484,12 @@ class GUIApp:
                 self._settings_status("Downloading model...", "#FF9F0A")
                 def _on_download_done():
                     self._settings_status("Loading model...", "#FF9F0A")
-                    self._engine = DictationApp(self._config)
-                    self._engine.add_callback(self._on_state_change)
+                    self._engine = self._new_engine()
                     self._engine.start_background()
                 onboarding = OnboardingWindow(self._root, self._config, on_done=_on_download_done)
                 onboarding.show()
             else:
-                self._engine = DictationApp(self._config)
-                self._engine.add_callback(self._on_state_change)
+                self._engine = self._new_engine()
                 self._engine.start_background()
         else:
             self._settings_status("Settings saved.", "#30D158")

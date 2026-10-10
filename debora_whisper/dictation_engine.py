@@ -21,6 +21,7 @@ from datetime import datetime
 
 from debora_whisper import paths
 from debora_whisper.harness import MemoryHotwords
+from debora_whisper.solo_key import SoloKeyTap
 from debora_whisper.paths import CACHE_DIR, CONFIG_DIR, CONFIG_FILE, LOG_DIR, MODEL_DIR
 from debora_whisper.vad_endpoint import AdaptiveEndpoint, VadSegment
 from debora_whisper.voice_chat import (VoiceChat, download_llm, ensure_tts_server, is_http_url,
@@ -51,6 +52,7 @@ DEFAULT_CONFIG = {
     "model_size": "turbo",     # see MODEL_REGISTRY; turbo: large-v3-turbo
     "language": "en",          # Language code or "auto"
     "hotkey": "ctrl+space",    # Global hotkey to toggle recording
+    "voice_chat_hotkey": "right alt",  # Tapped alone, switches voice chat; "" disables
     "auto_enter": False,       # Press Enter after pasting (useful for Claude Code)
     # Continuous drafts: shown in the overlay only, or also typed into the
     # target and rewritten with Shift+Left. Rewriting assumes the editor
@@ -347,6 +349,8 @@ def validate_config(config: dict):
             raise ValueError(f"{key} must be a non-empty string, got {value!r}")
     if config.get("voice_chat_backend", "local") not in ("local", "claude"):
         raise ValueError("voice_chat_backend must be local or claude")
+    if not isinstance(config.get("voice_chat_hotkey", ""), str):
+        raise ValueError("voice_chat_hotkey must be a string")
     if not isinstance(config.get("harness_hotwords", True), bool):
         raise ValueError("harness_hotwords must be a bool")
     for key in ("harness_cwd", "harness_model", "harness_prompt_file", "harness_memory_file"):
@@ -2589,6 +2593,9 @@ class DictationApp:
             config=config,
         )
         self.chimes = ChimePlayer()
+        # Called instead of set_voice_chat when the voice chat hotkey is
+        # tapped, so the tray app can save and show the change. Must not block.
+        self.on_voice_chat_toggle = None
         self._audio_lifecycle_lock = threading.Lock()
         self._stopping = threading.Event()
         # Orders the final "still running?" check plus paste/history against
@@ -3505,12 +3512,29 @@ class DictationApp:
         hotkey = self.config["hotkey"]
         keyboard.add_hotkey(hotkey, self.toggle_recording, suppress=True)
         log(f"Hotkey {hotkey} registered.")
+        self._register_voice_chat_hotkey(keyboard)
 
         log("Loading model in background (first time may take several minutes)...")
         self._start_loader()
         if self.config.get("voice_chat"):
             self._warm_up_voice_chat()
         self._start_segment_consumer()
+
+    def _register_voice_chat_hotkey(self, keyboard):
+        key = self.config.get("voice_chat_hotkey", "").strip()
+        if not key:
+            return
+        keyboard.hook(SoloKeyTap(key, self._on_voice_chat_hotkey).handle)
+        log(f"Voice chat hotkey {key} registered (tap it alone).")
+
+    def _on_voice_chat_hotkey(self):
+        """On the keyboard hook's thread, which must return quickly."""
+        if self.on_voice_chat_toggle:
+            self.on_voice_chat_toggle()
+        else:
+            enabled = not self.config.get("voice_chat")
+            threading.Thread(target=self.set_voice_chat, args=(enabled,),
+                             daemon=True).start()
 
     def set_voice_chat(self, enabled: bool):
         """Switch voice chat while running. On: the TTS server and the LLM
@@ -3726,6 +3750,7 @@ class DictationApp:
 
         # Register global hotkey immediately so it's responsive during loading
         keyboard.add_hotkey(hotkey, self.toggle_recording, suppress=True)
+        self._register_voice_chat_hotkey(keyboard)
 
         # Load model in background so hotkey is responsive during load
         log("Loading model in background (first time may take several minutes)...")

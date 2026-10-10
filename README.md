@@ -155,6 +155,7 @@ Stored at `~/.debora/config.json`:
   "model_size": "turbo",
   "language": "en",
   "hotkey": "ctrl+space",
+  "voice_chat_hotkey": "right alt",
   "tap_action": "continuous",
   "auto_enter": false,
   "inline_drafts": false,
@@ -170,6 +171,10 @@ RTX via faster-whisper, Whisper models only; `GPU` = Intel iGPU). When the
 active device is lost, it falls back to the next healthy one. `-Device` on the
 command line overrides the list for that run. `device` is written by the app
 and records the device last chosen.
+
+`voice_chat_hotkey` switches voice chat on and off when tapped alone (pressed
+and released with no other key). It is never blocked, so AltGr combinations
+such as AltGr+Q still type. Set it to `""` to turn it off.
 
 `tap_action` is what a short hotkey press does: `continuous` (default) starts
 continuous listening, `toggle` starts a recording that the next press stops.
