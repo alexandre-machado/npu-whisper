@@ -514,7 +514,8 @@ class HarnessSession:
                             if chunk:
                                 if (new_text_block and last_text and not last_text[-1].isspace()
                                         and not chunk[0].isspace()
-                                        and chunk[0] not in ".,;:!?)]}…\"'”’»›"):
+                                        # Straight quotes may open a quote.
+                                        and chunk[0] not in ".,;:!?)]}…”’»›"):
                                     chunk = " " + chunk
                                 on_text(chunk)
                                 last_text = chunk

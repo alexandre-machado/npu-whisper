@@ -197,7 +197,9 @@ def spoken_numbers(text: str, language) -> str:
         def convert(m):
             # Keep identifiers intact, but allow sentence punctuation and labels.
             before, after = m.string[:m.start()], m.string[m.end():]
-            if (re.search(r"\w$|[\w./\\][./\\]+$|[\d./\\:-]:+$", before)
+            # A path separator before the number, or a colon after a file
+            # name (app.py:10), is a reference; "Total:10" is a label.
+            if (re.search(r"\w$|[./\\]$|[\d./\\:-]:+$|[./\\]\S*:+$", before)
                     or re.match(r"\w|[./\\]+(?=[\w-])|:+(?=[\d/\\.-])", after)):
                 return m[0]
             if before.endswith("-") or after.startswith("-"):

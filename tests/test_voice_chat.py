@@ -1328,6 +1328,7 @@ def test_numbers_are_spoken_as_words(language, text, spoken):
     "backup-09/10/2026", "log-14:07", "v10h18", "build1h", "build3.5%",
     "item1º", "item2ª", "3-files", "12_34", "2.1.296", "3/4",
     r"C:\logs\20261010.txt", "file_2.txt", "a/b/3",
+    "app.py:10:20", "app.py:10", r"C:\123", "src/app.py:42",
 ])
 def test_numbers_inside_identifiers_are_unchanged(language, token):
     text = f"Arquivo ({token})."
@@ -1606,11 +1607,23 @@ def test_claude_text_blocks_are_separated_in_the_reply(server, tmp_path, boundar
     ("segurança. ", "Pronto."), ("segurança.", " Pronto."),
     ("segurança.\n", "Pronto."), ("segurança.", "\nPronto."),
     ("Valor confirmado", ", correto."), ("Concluído", "."),
-    *[("Concluído", punctuation) for punctuation in ";:!?)]}…\"'”’»›"],
+    *[("Concluído", punctuation) for punctuation in ";:!?)]}…”’»›"],
 ])
 @pytest.mark.parametrize("boundary", ["message_start", "tool_use"])
 def test_claude_block_separator_preserves_whitespace_and_punctuation(
         tmp_path, before, after, boundary):
+    assert _blocks_across(tmp_path, before, after, boundary) == [before, after]
+
+
+@pytest.mark.parametrize("quote", ['"Sim."', "'Sim.'"])
+@pytest.mark.parametrize("boundary", ["message_start", "tool_use"])
+def test_claude_block_separator_keeps_the_space_before_an_opening_quote(
+        tmp_path, quote, boundary):
+    assert _blocks_across(tmp_path, "Ele respondeu:", quote, boundary) == [
+        "Ele respondeu:", " " + quote]
+
+
+def _blocks_across(tmp_path, before, after, boundary):
     between = ({"type": "message_start"} if boundary == "message_start" else
                {"type": "content_block_start", "content_block": {
                    "type": "tool_use", "id": "tool-1", "name": "Bash"}})
@@ -1627,7 +1640,7 @@ def test_claude_block_separator_preserves_whitespace_and_punctuation(
         session.send("oi", chunks.append, threading.Event())
     finally:
         closed.set()
-    assert chunks == [before, after]
+    return chunks
 
 
 def test_claude_session_that_does_not_resume_is_forgotten(tmp_path):
