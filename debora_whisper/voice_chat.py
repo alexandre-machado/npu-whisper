@@ -193,6 +193,16 @@ def spoken_numbers(text: str, language) -> str:
     def words(n, to="cardinal"):
         return num2words(n, lang=lang, to=to)
 
+    def standalone(replace):
+        def convert(m):
+            # Keep identifiers intact, but allow trailing sentence punctuation.
+            before, after = m.string[:m.start()], m.string[m.end():]
+            if (re.search(r"[\w./\\:-]$", before)
+                    or re.match(r"[\w/\\-]|[.:]+(?=[\w/\\:-])", after)):
+                return m[0]
+            return replace(m)
+        return convert
+
     def hour(h):
         spoken = words(int(h))
         if language == "pt":  # uma hora, duas horas, vinte e uma horas
@@ -229,19 +239,22 @@ def spoken_numbers(text: str, language) -> str:
         except Exception:  # OverflowError past 10**36: read the digits
             return m[0]
 
-    text = _DATE.sub(date, text)
-    text = _TIME.sub(time_of_day, text)
+    text = _DATE.sub(standalone(date), text)
+    text = _TIME.sub(standalone(time_of_day), text)
     if language == "pt":
-        text = _HOURS.sub(lambda m: f"{hour(m[1])} hora{'s' if int(m[1]) != 1 else ''}", text)
+        text = _HOURS.sub(standalone(
+            lambda m: f"{hour(m[1])} hora{'s' if int(m[1]) != 1 else ''}"), text)
         # 1º de outubro, 2ª feira
-        text = re.sub(r"\b(\d+)º", lambda m: words(int(m[1]), "ordinal"), text)
-        text = re.sub(r"\b(\d+)ª", lambda m: re.sub(r"o\b", "a", words(int(m[1]), "ordinal")), text)
+        text = re.sub(r"\b(\d+)º", standalone(lambda m: words(int(m[1]), "ordinal")), text)
+        text = re.sub(r"\b(\d+)ª", standalone(
+            lambda m: re.sub(r"o\b", "a", words(int(m[1]), "ordinal"))), text)
     if language in _PERCENT:
-        text = re.sub(r"(\d)\s*%", rf"\1 {_PERCENT[language]}", text)
+        text = re.sub(r"(\d[\d.,]*)\s*%", standalone(
+            lambda m: f"{m[1]} {_PERCENT[language]}"), text)
     sep = r"\," if language in _DOT_DECIMAL else r"\."
     dec = r"\." if language in _DOT_DECIMAL else r","
     return re.sub(rf"\d{{1,3}}(?:{sep}\d{{3}})+(?:{dec}\d+)?|\d+(?:{dec}\d+)?",
-                  number, text)
+                  standalone(number), text)
 
 
 def split_sentences(buffer: str, first=False) -> tuple[list[str], str]:
@@ -594,6 +607,7 @@ def tts_command(config: dict, log=print) -> list[str] | None:
 
 _tts_lock = threading.Lock()
 _tts_process: subprocess.Popen | None = None
+_tts_stopping = threading.Event()
 
 
 def tts_server_up(config: dict) -> bool:
@@ -612,6 +626,7 @@ def ensure_tts_server(config: dict, log=print, log_path=None):
     if not is_http_url(config.get("tts_url")):
         return
     with _tts_lock:
+        _tts_stopping.clear()
         if _tts_process is not None:
             if _tts_process.poll() is not None and not _tts_process.reported:
                 # Starting it again would only fail again, costing the wait
@@ -660,6 +675,7 @@ def stop_tts_server():
     """Stop the TTS server this process started, if any."""
     global _tts_process
     with _tts_lock:
+        _tts_stopping.set()
         process, _tts_process = _tts_process, None
     if process is None:
         return
@@ -1033,7 +1049,8 @@ class VoiceChat:
                         except Exception as e:
                             # Keep showing the text even without a voice.
                             tts_ok = False
-                            self.log(f"Voice chat: TTS failed ({e}); showing the reply only.")
+                            if not stop.is_set() and not _tts_stopping.is_set():
+                                self.log(f"Voice chat: TTS failed ({e}); showing the reply only.")
                     if audio is not None:
                         timing["audio"] = len(audio[0]) / audio[1]
                         timing["spoken"] = spoken
