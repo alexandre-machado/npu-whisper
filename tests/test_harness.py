@@ -26,6 +26,10 @@ def _rules(command, flag):
      "//c/Users/Test User/.debora/config.json*"),
     (PurePosixPath("/home/test/.npu-dictation/config.json"),
      "//home/test/.npu-dictation/config.json*"),
+    (PureWindowsPath("C:/Users/Alex[work] {team}/.debora/config.json"),
+     r"//c/Users/Alex\[work\] \{team\}/.debora/config.json*"),
+    (PurePosixPath(r"/home/Alex[work] *?{team}\name/.debora/config.json"),
+     r"//home/Alex\[work\] \*\?\{team\}\\name/.debora/config.json*"),
 ])
 def test_config_edit_rules_always_apply(tmp_path, monkeypatch, response, mode,
                                        config_file, pattern):

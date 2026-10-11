@@ -1327,11 +1327,27 @@ def test_numbers_are_spoken_as_words(language, text, spoken):
     "20261010.json", "backup_20261010", "2026-10-10", "/2026/10/log.txt",
     "backup-09/10/2026", "log-14:07", "v10h18", "build1h", "build3.5%",
     "item1º", "item2ª", "3-files", "12_34", "2.1.296", "3/4",
-    r"C:\logs\20261010.txt",
+    r"C:\logs\20261010.txt", "file_2.txt", "a/b/3",
 ])
 def test_numbers_inside_identifiers_are_unchanged(language, token):
     text = f"Arquivo ({token})."
     assert vc.spoken_numbers(text, language) == text
+
+
+@pytest.mark.parametrize("language", ["pt", "en"])
+@pytest.mark.parametrize("text, pt, en", [
+    ("-10", "-dez", "-ten"),
+    ("Valor -10", "Valor -dez", "Valor -ten"),
+    ("(-10)", "(-dez)", "(-ten)"),
+    ("10-20", "dez-vinte", "ten-twenty"),
+    ("-5%", "-cinco por cento", "-five percent"),
+    ("Total:10", "Total:dez", "Total:ten"),
+    ("14:07", "catorze e sete", "fourteen oh seven"),
+    ("09/10/2026", "nove de outubro de dois mil e vinte e seis",
+     "September tenth, twenty twenty-six"),
+])
+def test_numeric_expressions_are_spoken_as_words(language, text, pt, en):
+    assert vc.spoken_numbers(text, language) == (pt if language == "pt" else en)
 
 
 @pytest.mark.parametrize("text, spoken", [
@@ -1589,11 +1605,18 @@ def test_claude_text_blocks_are_separated_in_the_reply(server, tmp_path, boundar
 @pytest.mark.parametrize("before, after", [
     ("segurança. ", "Pronto."), ("segurança.", " Pronto."),
     ("segurança.\n", "Pronto."), ("segurança.", "\nPronto."),
+    ("Valor confirmado", ", correto."), ("Concluído", "."),
+    *[("Concluído", punctuation) for punctuation in ";:!?)]}…\"'”’»›"],
 ])
-def test_claude_block_separator_preserves_existing_whitespace(tmp_path, before, after):
+@pytest.mark.parametrize("boundary", ["message_start", "tool_use"])
+def test_claude_block_separator_preserves_whitespace_and_punctuation(
+        tmp_path, before, after, boundary):
+    between = ({"type": "message_start"} if boundary == "message_start" else
+               {"type": "content_block_start", "content_block": {
+                   "type": "tool_use", "id": "tool-1", "name": "Bash"}})
     events = [
         {"type": "stream_event", "event": {"delta": {"type": "text_delta", "text": before}}},
-        {"type": "stream_event", "event": {"type": "message_start"}},
+        {"type": "stream_event", "event": between},
         {"type": "stream_event", "event": {"delta": {"type": "text_delta", "text": after}}},
         {"type": "result"},
     ]

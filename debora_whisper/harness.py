@@ -79,6 +79,8 @@ def harness_command(config: dict, session_id: str, resume: bool) -> list[str]:
     config_path = paths.CONFIG_FILE.resolve().as_posix()
     # Claude uses // absolute paths and /c/... for Windows drive paths.
     config_path = re.sub(r"^([A-Za-z]):/", lambda m: f"/{m[1].lower()}/", config_path)
+    # Read/Edit use gitignore syntax: backslash escapes literal pattern characters.
+    config_path = re.sub(r"[\\*?\[\]{}]", lambda m: "\\" + m[0], config_path)
     config_rule = "//" + config_path.lstrip("/") + "*"
     # An Edit rule covers every file editor (Write rules only warn). Bash can
     # still bypass this: defense in depth, not a permission boundary.
@@ -511,7 +513,8 @@ class HarnessSession:
                             chunk = delta["text"]
                             if chunk:
                                 if (new_text_block and last_text and not last_text[-1].isspace()
-                                        and not chunk[0].isspace()):
+                                        and not chunk[0].isspace()
+                                        and chunk[0] not in ".,;:!?)]}…\"'”’»›"):
                                     chunk = " " + chunk
                                 on_text(chunk)
                                 last_text = chunk

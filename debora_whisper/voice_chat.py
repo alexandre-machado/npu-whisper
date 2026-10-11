@@ -195,11 +195,19 @@ def spoken_numbers(text: str, language) -> str:
 
     def standalone(replace):
         def convert(m):
-            # Keep identifiers intact, but allow trailing sentence punctuation.
+            # Keep identifiers intact, but allow sentence punctuation and labels.
             before, after = m.string[:m.start()], m.string[m.end():]
-            if (re.search(r"[\w./\\:-]$", before)
-                    or re.match(r"[\w/\\-]|[.:]+(?=[\w/\\:-])", after)):
+            if (re.search(r"\w$|[\w./\\][./\\]+$|[\d./\\:-]:+$", before)
+                    or re.match(r"\w|[./\\]+(?=[\w-])|:+(?=[\d/\\.-])", after)):
                 return m[0]
+            if before.endswith("-") or after.startswith("-"):
+                # A minus or numeric range is spoken; hyphenated filenames and
+                # ISO dates stay intact, including later numeric components.
+                token = (re.search(r"[\w./\\-]*$", before)[0] + m[0]
+                         + re.match(r"[\w./\\-]*", after)[0])
+                if (re.search(r"[^\W\d]", token)
+                        or re.fullmatch(r"\d{4}-\d{2}-\d{2}", token.rstrip("."))):
+                    return m[0]
             return replace(m)
         return convert
 
