@@ -1805,6 +1805,10 @@ def test_valid_final_interrupts_a_paused_reply(playing_reply):
 def test_pause_timeout_replays_without_a_final(playing_reply):
     app, worker, cut, played, shown, talking, logs = playing_reply(voice_chat_pause_timeout=0.05)
     app._voice_activity(True)
+    assert cut.wait(3)
+    time.sleep(0.2)  # still talking: no timeout yet
+    assert app.voice_chat._paused and len(played) == 1
+    app._voice_activity(False)
     worker.join(3)
     assert not worker.is_alive()
     assert len(played) == 3
@@ -1976,6 +1980,7 @@ def test_pause_keeps_inflight_server_synthesis_running(cancellable_tts_server):
     result, errors = [], []
     chat._clip_stop = vc.PlaybackStop(chat._interrupt)
     chat._show_audio(True)
+    chat.speaking = True
 
     def synthesize():
         try:
@@ -2066,3 +2071,13 @@ def test_tts_server_synthesizes_without_hooks_on_another_model_layout():
     finally:
         client.close()
         server.close()
+
+
+def test_pause_between_sentences_holds_the_next_one():
+    chat = vc.VoiceChat({**DEFAULT_CONFIG, "voice_chat": True}, log=lambda *a: None)
+    chat.speaking = True
+    assert chat._clip_stop is None  # no clip playing: the next one is still rendering
+    assert chat.pause()
+    assert chat._paused and chat._pause_deadline is None
+    chat.speech_ended()
+    assert chat._pause_deadline is not None

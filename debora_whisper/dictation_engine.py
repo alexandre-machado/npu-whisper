@@ -3291,8 +3291,11 @@ class DictationApp:
 
     def _voice_activity(self, active):
         self._talking("user", active)
-        if active and self.config.get("voice_chat") and not self._stopping.is_set():
-            self.voice_chat.pause()
+        if self.config.get("voice_chat") and not self._stopping.is_set():
+            if active:
+                self.voice_chat.pause()
+            else:
+                self.voice_chat.speech_ended()
 
     def _voice_chat_turn(self, text, audio, is_final, captured_at=None):
         """Save each final immediately; replies run separately from ASR."""
